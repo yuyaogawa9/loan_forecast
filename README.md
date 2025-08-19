@@ -24,5 +24,5 @@ To manage this scale, the analysis is conducted using **lazy evaluation with Pol
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yuyaogawa8/mg.git
-   cd mg
+   git clone https://github.com/yuyaogawa8/loan_forecast.git
+   cd loan_forecast
