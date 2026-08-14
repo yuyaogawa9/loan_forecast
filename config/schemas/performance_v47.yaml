@@ -1,0 +1,232 @@
+# Freddie Mac Single-Family Loan-Level Dataset -- Monthly Performance Data File
+# Layout version 47 (July 2026 release). Headerless, pipe-delimited, 32 fields.
+#
+# Every field is retained. The loss/expense/recovery columns are ~99.5% null and
+# compress to almost nothing under zstd, so keeping them is nearly free -- and
+# they are precisely the columns required for the chargeoff, recovery and
+# severity targets. The previous loader read them and threw them away.
+#
+# Sentinel values marked `verify: true` should be re-confirmed against the
+# Release 47 User Guide PDF (not machine-fetchable).
+
+version: 47
+dataset: performance
+field_count: 32
+separator: "|"
+has_header: false
+
+fields:
+  - pos: 1
+    name: LOAN_SEQUENCE_NUMBER
+    dtype: Utf8
+    nulls: []
+    foreign_key: origination.LOAN_SEQUENCE_NUMBER
+    pattern: '^F\d{2}Q\d[0-9A-Z]+$'
+
+  - pos: 2
+    name: MONTHLY_REPORTING_PERIOD
+    dtype: Utf8
+    yyyymm: true
+    nulls: []
+    desc: YYYYMM. Kept as string (downstream slices it); Date emitted as MONTHLY_REPORTING_PERIOD_DT.
+
+  - pos: 3
+    name: CURRENT_ACTUAL_UPB
+    dtype: Float64
+    nulls: [""]
+    valid: {min: 0}
+    verify: true
+    desc: >
+      Freddie rounds this to the nearest $1,000 for some vintages/periods. That
+      rounding is larger than a typical curtailment, so derive/amortization.py
+      gates partial-prepayment detection on UPB_ROUNDING_TOLERANCE. Confirm the
+      exact rounding convention per release before trusting curtailment output.
+
+  - pos: 4
+    name: CURRENT_LOAN_DELINQUENCY_STATUS
+    dtype: Utf8
+    nulls: ["XX"]
+    categorical: true
+    desc: >
+      MUST stay a string. "0".."N" are months delinquent, "RA" = REO Acquisition,
+      "XX" = unknown. The previous loader coerced this to numeric, destroying RA
+      and XX. Numeric months are exposed separately as DLQ_MONTHS in derive/events.py.
+
+  - pos: 5
+    name: LOAN_AGE
+    dtype: Int32
+    nulls: [""]
+    desc: Months since origination. Can be negative in rare early-reporting cases.
+
+  - pos: 6
+    name: REMAINING_MONTHS_TO_LEGAL_MATURITY
+    dtype: Int32
+    nulls: [""]
+
+  - pos: 7
+    name: DEFECT_SETTLEMENT_DATE
+    dtype: Utf8
+    yyyymm: true
+    nulls: [""]
+
+  - pos: 8
+    name: MODIFICATION_FLAG
+    dtype: Utf8
+    nulls: [""]
+    enum: ["Y", "P", "N"]
+    desc: Y = modified this period, P = prior modification. Resets the amortization schedule.
+
+  - pos: 9
+    name: ZERO_BALANCE_CODE
+    dtype: Utf8
+    nulls: [""]
+    enum: ["01", "02", "03", "09", "15", "16", "96", "97", "98"]
+    enum_strict: false
+    desc: >
+      Terminal event code. 01=Prepaid/Matured (voluntary payoff), 02=Third-party
+      sale, 03=Short sale or charge-off, 09=REO disposition, 15=Whole loan /
+      note sale (loss data included), 16=Reperforming loan securitization (NO
+      losses disclosed -- must be censored, not labelled non-default),
+      96=Repurchase due to defect. New codes are recorded as warnings rather
+      than failing the build, hence enum_strict: false.
+
+  - pos: 10
+    name: ZERO_BALANCE_EFFECTIVE_DATE
+    dtype: Utf8
+    yyyymm: true
+    nulls: [""]
+
+  - pos: 11
+    name: CURRENT_INTEREST_RATE
+    dtype: Float64
+    nulls: [""]
+    valid: {min: 0, max: 25}
+
+  - pos: 12
+    name: CURRENT_NON_INTEREST_BEARING_UPB
+    dtype: Float64
+    nulls: [""]
+    desc: Deferred principal. Add to INTEREST_BEARING_UPB for total obligation.
+
+  - pos: 13
+    name: DUE_DATE_OF_LAST_PAID_INSTALLMENT
+    dtype: Utf8
+    yyyymm: true
+    nulls: [""]
+
+  - pos: 14
+    name: MI_RECOVERIES
+    dtype: Float64
+    nulls: [""]
+
+  - pos: 15
+    name: NET_SALE_PROCEEDS
+    dtype: Utf8
+    nulls: [""]
+    special_codes: ["C", "U"]
+    desc: >
+      MIXED type -- numeric amount, or the literal codes C (proceeds Covered the
+      loss) / U (Unknown). This is why ingest reads every field as Utf8 first and
+      casts explicitly afterwards: a reader-level numeric cast would silently
+      destroy C/U. Numeric form is emitted as NET_SALE_PROCEEDS_AMT, the code as
+      NET_SALE_PROCEEDS_CODE.
+
+  - pos: 16
+    name: NON_MI_RECOVERIES
+    dtype: Float64
+    nulls: [""]
+
+  - pos: 17
+    name: TOTAL_EXPENSES
+    dtype: Float64
+    nulls: [""]
+
+  - pos: 18
+    name: LEGAL_COSTS
+    dtype: Float64
+    nulls: [""]
+
+  - pos: 19
+    name: MAINTENANCE_AND_PRESERVATION_COSTS
+    dtype: Float64
+    nulls: [""]
+
+  - pos: 20
+    name: TAXES_AND_INSURANCE
+    dtype: Float64
+    nulls: [""]
+
+  - pos: 21
+    name: MISCELLANEOUS_EXPENSES
+    dtype: Float64
+    nulls: [""]
+
+  - pos: 22
+    name: ACTUAL_LOSS_CALCULATION
+    dtype: Float64
+    nulls: [""]
+    desc: >
+      Freddie's own loss figure, negative when a loss occurred. Used as ground
+      truth for severity, and reconciled against an independently reconstructed
+      loss in validate.py.
+
+  - pos: 23
+    name: CUMULATIVE_MODIFICATION_COST
+    dtype: Float64
+    nulls: [""]
+
+  - pos: 24
+    name: STEP_MODIFICATION_FLAG
+    dtype: Utf8
+    nulls: [""]
+    enum: ["Y", "N"]
+
+  - pos: 25
+    name: PAYMENT_DEFERRAL
+    dtype: Utf8
+    nulls: [""]
+    enum_strict: false
+    desc: Codes vary across releases; left unconstrained and reported as a distribution.
+
+  - pos: 26
+    name: ESTIMATED_LOAN_TO_VALUE
+    dtype: Float64
+    nulls: ["999", ""]
+    valid: {min: 1, max: 998}
+    desc: >
+      Heavily null -- final_data_clean.ipynb drops it for that reason. Retained
+      here; the decision to drop belongs downstream, not in the ETL.
+
+  - pos: 27
+    name: ZERO_BALANCE_REMOVAL
+    dtype: Float64
+    nulls: [""]
+    desc: UPB just prior to the zero-balance event. Denominator for severity.
+
+  - pos: 28
+    name: DELINQUENT_ACCRUED_INTEREST
+    dtype: Float64
+    nulls: [""]
+
+  - pos: 29
+    name: DELINQUENCY_DUE_TO_DISASTER
+    dtype: Utf8
+    nulls: [""]
+    enum: ["Y"]
+
+  - pos: 30
+    name: BORROWER_ASSISTANCE_STATUS_CODE
+    dtype: Utf8
+    nulls: [""]
+    enum: ["F", "R", "T"]
+    desc: F=Forbearance, R=Repayment plan, T=Trial period plan.
+
+  - pos: 31
+    name: CURRENT_MONTH_MODIFICATION_COST
+    dtype: Float64
+    nulls: [""]
+
+  - pos: 32
+    name: INTEREST_BEARING_UPB
+    dtype: Float64
+    nulls: [""]

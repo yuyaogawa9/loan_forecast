@@ -1,0 +1,35 @@
+# --- Secrets -----------------------------------------------------------------
+# Covers secret.env, .env, and any *.env variant. The example template is the
+# one exception and is committed so the required keys are discoverable.
+*.env
+!.env.example
+
+# --- Data --------------------------------------------------------------------
+# Data lives outside the repo at $DATA_ROOT, but guard against accidents.
+data/
+*.parquet
+*.duckdb
+*.duckdb.wal
+*.txt.gz
+*.zip
+
+# --- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- Notebooks ---------------------------------------------------------------
+.ipynb_checkpoints/
+
+# --- macOS -------------------------------------------------------------------
+.DS_Store

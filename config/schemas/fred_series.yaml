@@ -1,0 +1,160 @@
+# FRED / ALFRED series registry for the macro panel.
+#
+# POINT-IN-TIME CORRECTNESS
+# -------------------------
+# Two distinct kinds of look-ahead bias are handled here, and they are NOT the
+# same thing:
+#
+#   1. REVISION bias. FRED's `get_series` returns the LATEST vintage of a series.
+#      State unemployment is revised substantially (annual benchmarking plus
+#      seasonal-factor re-estimation). Joining today's vintage of 2008
+#      unemployment onto 2008 loan-months leaks information that did not exist
+#      in 2008. Handled via ALFRED: `pit_mode: first_release` uses the value as
+#      originally printed; `all_releases` keeps the full vintage history so an
+#      as-of join can be done exactly.
+#
+#   2. PUBLICATION LAG. Even the first print of month M's unemployment is not
+#      available until roughly the third week of M+1. `publication_lag_months`
+#      shifts each series forward so that a loan-month M only ever sees data
+#      that had actually been published by then.
+#
+# Both must be applied. Fixing revisions but not the lag still leaks a month.
+
+defaults:
+  pit_mode: first_release
+  publication_lag_months: 1
+
+series:
+  - id: UNRATE
+    name: UNEMPLOYMENT_NATIONAL
+    geo_level: national
+    frequency: monthly
+    publication_lag_months: 1
+    agg: last
+
+  - id: MORTGAGE30US
+    name: MORTGAGE_RATE_30Y
+    geo_level: national
+    frequency: weekly
+    agg: mean            # weekly -> monthly mean
+    publication_lag_months: 0
+    pit_mode: last        # not meaningfully revised
+    desc: Primary Mortgage Market Survey 30-year fixed. Drives refi incentive.
+
+  - id: DGS10
+    name: TREASURY_10Y
+    geo_level: national
+    frequency: daily
+    agg: mean
+    publication_lag_months: 0
+    pit_mode: last        # market data, not revised
+
+  - id: DGS2
+    name: TREASURY_2Y
+    geo_level: national
+    frequency: daily
+    agg: mean
+    publication_lag_months: 0
+    pit_mode: last
+
+  - id: CPIAUCSL
+    name: CPI
+    geo_level: national
+    frequency: monthly
+    publication_lag_months: 1
+    agg: last
+
+  - id: GDPC1
+    name: REAL_GDP
+    geo_level: national
+    frequency: quarterly
+    publication_lag_months: 3   # advance estimate ~1 month after quarter end
+    agg: last
+    fill: forward               # quarterly -> monthly
+
+  - id: USREC
+    name: RECESSION_NBER
+    geo_level: national
+    frequency: monthly
+    publication_lag_months: 12
+    pit_mode: last
+    pit_unsafe: true
+    desc: >
+      NBER recession dating is assigned RETROACTIVELY, often more than a year
+      after the fact -- the 2007 peak was not announced until Dec 2008. Even
+      with a 12-month lag this is only an approximation of what was knowable.
+      Excluded from the default feature set; opt in explicitly and understand
+      that it is the single most look-ahead-prone series here.
+
+# State-level unemployment: series id is "{STATE}UR".
+state_unemployment:
+  id_template: "{state}UR"
+  name: UNEMPLOYMENT_STATE
+  geo_level: state
+  frequency: monthly
+  publication_lag_months: 1
+  agg: last
+  states:
+    - AL
+    - AK
+    - AZ
+    - AR
+    - CA
+    - CO
+    - CT
+    - DE
+    - DC   # was MISSING from the previous 50-state list in makedb.py, which
+           # silently nulled out every DC loan on the macro join.
+    - FL
+    - GA
+    - HI
+    - ID
+    - IL
+    - IN
+    - IA
+    - KS
+    - KY
+    - LA
+    - ME
+    - MD
+    - MA
+    - MI
+    - MN
+    - MS
+    - MO
+    - MT
+    - NE
+    - NV
+    - NH
+    - NJ
+    - NM
+    - NY
+    - NC
+    - ND
+    - OH
+    - OK
+    - OR
+    - PA
+    - PR   # Freddie discloses PR loans; FRED carries PRUR.
+    - RI
+    - SC
+    - SD
+    - TN
+    - TX
+    - UT
+    - VT
+    - VA
+    - WA
+    - WV
+    - WI
+    - WY
+
+  # Freddie's PROPERTY_STATE also includes GU and VI, for which FRED has no
+  # reliable monthly UR series. Those loans get a null state unemployment and
+  # are reported in the coverage gate rather than silently dropped.
+  known_uncovered: [GU, VI]
+
+api:
+  rate_limit_per_minute: 120
+  max_retries: 5
+  backoff_base_seconds: 1.0

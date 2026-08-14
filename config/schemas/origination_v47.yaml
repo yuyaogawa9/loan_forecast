@@ -1,0 +1,233 @@
+# Freddie Mac Single-Family Loan-Level Dataset -- Origination Data File
+# Layout version 47 (July 2026 release). Headerless, pipe-delimited, 32 fields.
+#
+# Field order is authoritative and must match the source file exactly. The
+# ingest performs a pre-flight arity check against `field_count` and RAISES on
+# mismatch rather than silently dropping rows (the failure mode of the previous
+# loader, which dropped 100% of any vintage whose layout differed).
+#
+# `nulls` lists the literal strings that mean "missing" for that field. These
+# sentinels MUST be mapped to null before casting -- a CREDIT_SCORE of 9999 or
+# a DTI of 999 entering a model as a real number silently invalidates results.
+#
+# Sentinel values marked `verify: true` should be re-confirmed against the
+# Release 47 User Guide PDF, which is not machine-fetchable:
+#   https://www.freddiemac.com/fmac-resources/research/pdf/user_guide.pdf
+
+version: 47
+dataset: origination
+field_count: 32
+separator: "|"
+has_header: false
+
+fields:
+  - pos: 1
+    name: CREDIT_SCORE
+    dtype: Int16
+    nulls: ["9999", ""]
+    valid: {min: 301, max: 850}
+    desc: FICO at origination. 9999 = not available.
+
+  - pos: 2
+    name: FIRST_PAYMENT_DATE
+    dtype: Utf8
+    yyyymm: true
+    nulls: [""]
+    desc: YYYYMM. Kept as string for downstream .str.slice(); Date emitted as FIRST_PAYMENT_DATE_DT.
+
+  - pos: 3
+    name: FIRST_TIME_HOMEBUYER_FLAG
+    dtype: Utf8
+    nulls: ["9", ""]
+    enum: ["Y", "N"]
+    desc: 9 = not available / not applicable.
+
+  - pos: 4
+    name: MATURITY_DATE
+    dtype: Utf8
+    yyyymm: true
+    nulls: [""]
+
+  - pos: 5
+    name: METROPOLITAN_DIVISION
+    dtype: Utf8
+    nulls: [""]
+    desc: >
+      Freddie's official name is "Metropolitan Statistical Area (MSA) or
+      Metropolitan Division". Name kept as METROPOLITAN_DIVISION for continuity
+      with the previous loader and any downstream references. 5-digit CBSA code.
+
+  - pos: 6
+    name: MORTGAGE_INSURANCE_PERCENTAGE
+    dtype: Int16
+    nulls: ["999", ""]
+    valid: {min: 0, max: 55}
+    desc: 000 means "no MI" and is a REAL value, not missing. Only 999 is unknown.
+
+  - pos: 7
+    name: NUMBER_OF_UNITS
+    dtype: Int8
+    nulls: ["99", ""]
+    valid: {min: 1, max: 4}
+
+  - pos: 8
+    name: OCCUPANCY_STATUS
+    dtype: Utf8
+    nulls: ["9", ""]
+    enum: ["P", "I", "S"]
+    desc: P=Primary, I=Investment, S=Second home.
+
+  - pos: 9
+    name: ORIGINAL_COMBINED_LOAN_TO_VALUE
+    dtype: Float64
+    nulls: ["999", ""]
+    valid: {min: 1, max: 998}
+
+  - pos: 10
+    name: ORIGINAL_DEBT_TO_INCOME
+    dtype: Int16
+    nulls: ["999", "", "   "]
+    valid: {min: 0, max: 65}
+    verify: true
+    desc: >
+      999 = unknown. Freddie also discloses DTI > 65% as blank spaces in newer
+      releases, so blank is ambiguous between "unknown" and ">65". Both map to
+      null here; the >65 truncation is a documented limitation of the source.
+
+  - pos: 11
+    name: ORIGINAL_UPB
+    dtype: Float64
+    nulls: [""]
+    valid: {min: 0}
+
+  - pos: 12
+    name: ORIGINAL_LOAN_TO_VALUE
+    dtype: Float64
+    nulls: ["999", ""]
+    valid: {min: 1, max: 998}
+
+  - pos: 13
+    name: ORIGINAL_INTEREST_RATE
+    dtype: Float64
+    nulls: [""]
+    valid: {min: 0, max: 25}
+
+  - pos: 14
+    name: CHANNEL
+    dtype: Utf8
+    nulls: ["9", ""]
+    enum: ["R", "B", "C", "T"]
+    desc: R=Retail, B=Broker, C=Correspondent, T=TPO not specified.
+
+  - pos: 15
+    name: PREPAYMENT_PENALTY_MORTGAGE
+    dtype: Utf8
+    nulls: [""]
+    enum: ["Y", "N"]
+
+  - pos: 16
+    name: AMORTIZATION_TYPE
+    dtype: Utf8
+    nulls: [""]
+    desc: Formerly PRODUCT_TYPE. FRM for the Standard dataset.
+
+  - pos: 17
+    name: PROPERTY_STATE
+    dtype: Utf8
+    nulls: [""]
+    desc: 2-char USPS code. Includes DC, PR, GU, VI -- see fred_series.yaml.
+
+  - pos: 18
+    name: PROPERTY_TYPE
+    dtype: Utf8
+    nulls: ["99", ""]
+    enum: ["CO", "PU", "MH", "SF", "CP"]
+
+  - pos: 19
+    name: POSTAL_CODE
+    dtype: Utf8
+    nulls: ["00000", ""]
+    desc: 3-digit ZIP prefix followed by "00". 00000 = not available.
+
+  - pos: 20
+    name: LOAN_SEQUENCE_NUMBER
+    dtype: Utf8
+    nulls: []
+    primary_key: true
+    pattern: '^F\d{2}Q\d[0-9A-Z]+$'
+    desc: >
+      Format F<YY>Q<Q><seq>, e.g. F01Q20167818 = 2001Q2. The embedded vintage is
+      cross-checked against the source filename in validate.py.
+
+  - pos: 21
+    name: LOAN_PURPOSE
+    dtype: Utf8
+    nulls: ["9", ""]
+    enum: ["P", "C", "N", "R"]
+    desc: P=Purchase, C=Cash-out refi, N=No cash-out refi, R=Refinance (not specified).
+
+  - pos: 22
+    name: ORIGINAL_LOAN_TERM
+    dtype: Int16
+    nulls: [""]
+    valid: {min: 1, max: 600}
+
+  - pos: 23
+    name: NUMBER_OF_BORROWERS
+    dtype: Int8
+    nulls: ["99", ""]
+    valid: {min: 1, max: 10}
+
+  - pos: 24
+    name: SELLER_NAME
+    dtype: Utf8
+    nulls: [""]
+    desc: '"Other sellers" is a real aggregated category, not missing.'
+
+  - pos: 25
+    name: SERVICER_NAME
+    dtype: Utf8
+    nulls: [""]
+
+  - pos: 26
+    name: SUPER_CONFORMING_FLAG
+    dtype: Utf8
+    nulls: [""]
+    enum: ["Y"]
+    desc: Y or blank. Blank means "not super conforming" -- derived to boolean downstream.
+
+  - pos: 27
+    name: PRE_RELIEF_REFINANCE_LOAN_SEQUENCE_NUMBER
+    dtype: Utf8
+    nulls: ["", "9" ]
+    desc: Links a relief-refi loan back to the loan it replaced.
+
+  - pos: 28
+    name: PROGRAM_INDICATOR
+    dtype: Utf8
+    nulls: ["9", ""]
+    enum: ["H", "F", "R"]
+
+  - pos: 29
+    name: RELIEF_REFINANCE_INDICATOR
+    dtype: Utf8
+    nulls: [""]
+    enum: ["Y"]
+
+  - pos: 30
+    name: PROPERTY_VALUATION_METHOD
+    dtype: Utf8
+    nulls: ["9", ""]
+    enum: ["1", "2", "3", "4"]
+
+  - pos: 31
+    name: INTEREST_ONLY_INDICATOR
+    dtype: Utf8
+    nulls: [""]
+    enum: ["Y", "N"]
+
+  - pos: 32
+    name: MI_CANCELLATION_INDICATOR
+    dtype: Utf8
+    nulls: ["7", "9", ""]
+    enum: ["Y", "N"]

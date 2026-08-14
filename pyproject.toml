@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "loan-forecast"
+version = "0.1.0"
+description = "ETL and modeling pipeline for the Freddie Mac Single-Family Loan-Level Dataset"
+requires-python = ">=3.10"
+
+dependencies = [
+    # polars >=1.25 is required for LazyFrame.collect(engine="streaming") and
+    # sink_parquet(partition_by=...), both of which this pipeline depends on.
+    "polars>=1.25",
+    "pyarrow>=15",
+    "duckdb>=1.0",
+    "fredapi>=0.5.2",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    # pandas is not used by the ETL (polars only). It is pinned to 2.x because
+    # the existing notebooks in run/ were written against 2.x and pandas 3.0
+    # is a breaking change.
+    "pandas>=2.2,<3.0",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+model = ["xgboost>=2.0", "scikit-learn>=1.4", "matplotlib>=3.8", "tqdm>=4.66"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+build-dataset = "run.build_dataset:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
