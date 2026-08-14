@@ -222,16 +222,16 @@ def build_performance_lines() -> list[str]:
             ZERO_BALANCE_CODE="09" if terminal else "",
             ZERO_BALANCE_EFFECTIVE_DATE=period if terminal else "",
             ZERO_BALANCE_REMOVAL="198500.00" if terminal else "",
-            NET_SALE_PROCEEDS="150000.00" if terminal else "",
-            MI_RECOVERIES="20000.00" if terminal else "",
-            NON_MI_RECOVERIES="1000.00" if terminal else "",
-            TOTAL_EXPENSES="-12000.00" if terminal else "",
-            LEGAL_COSTS="-3000.00" if terminal else "",
-            MAINTENANCE_AND_PRESERVATION_COSTS="-4000.00" if terminal else "",
-            TAXES_AND_INSURANCE="-4000.00" if terminal else "",
-            MISCELLANEOUS_EXPENSES="-1000.00" if terminal else "",
+            NET_SALE_PROCEEDS="-150000.00" if terminal else "",
+            MI_RECOVERIES="-20000.00" if terminal else "",
+            NON_MI_RECOVERIES="-1000.00" if terminal else "",
+            TOTAL_EXPENSES="12000.00" if terminal else "",
+            LEGAL_COSTS="3000.00" if terminal else "",
+            MAINTENANCE_AND_PRESERVATION_COSTS="4000.00" if terminal else "",
+            TAXES_AND_INSURANCE="4000.00" if terminal else "",
+            MISCELLANEOUS_EXPENSES="1000.00" if terminal else "",
             DELINQUENT_ACCRUED_INTEREST="8000.00" if terminal else "",
-            ACTUAL_LOSS_CALCULATION="-47500.00" if terminal else "",
+            ACTUAL_LOSS_CALCULATION="47500.00" if terminal else "",
         ))
 
     # --- L4: charge-off (ZB 03) with NET_SALE_PROCEEDS = "C" ---------------
@@ -245,7 +245,7 @@ def build_performance_lines() -> list[str]:
             ZERO_BALANCE_EFFECTIVE_DATE=period if terminal else "",
             ZERO_BALANCE_REMOVAL="197000.00" if terminal else "",
             NET_SALE_PROCEEDS="C" if terminal else "",
-            ACTUAL_LOSS_CALCULATION="-15000.00" if terminal else "",
+            ACTUAL_LOSS_CALCULATION="15000.00" if terminal else "",
         ))
 
     # --- L5: REO with NET_SALE_PROCEEDS = "U" (unknown) ---------------------
@@ -259,7 +259,7 @@ def build_performance_lines() -> list[str]:
             ZERO_BALANCE_EFFECTIVE_DATE=period if terminal else "",
             ZERO_BALANCE_REMOVAL="196000.00" if terminal else "",
             NET_SALE_PROCEEDS="U" if terminal else "",
-            ACTUAL_LOSS_CALCULATION="-30000.00" if terminal else "",
+            ACTUAL_LOSS_CALCULATION="30000.00" if terminal else "",
         ))
 
     # --- L6: partial prepayment (curtailment) at month 3 --------------------

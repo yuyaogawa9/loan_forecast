@@ -124,15 +124,16 @@ def test_prepaid_requires_payoff_before_maturity(curated):
 def test_reconstructed_loss_matches_freddie_figure(curated):
     """Independent reconstruction must reproduce ACTUAL_LOSS_CALCULATION.
 
-    Sign conventions are the trap: expenses are disclosed negative, recoveries
-    positive, and the loss itself negative.
+    Sign conventions are the trap, and an earlier version had all three
+    backwards: recoveries are disclosed NEGATIVE, expenses POSITIVE, and the
+    loss POSITIVE. The reconstruction is therefore a plain sum.
     """
     d = scan_dataset(curated.curated / "loan_month").collect()
     row = d.filter(pl.col("LOAN_SEQUENCE_NUMBER") == "F07Q10000003").filter(
         pl.col("IS_TERMINAL")
     ).to_dicts()[0]
-    assert row["TOTAL_RECOVERIES"] == pytest.approx(171_000.0)
-    assert row["TOTAL_EXPENSES_SUM"] == pytest.approx(12_000.0)
+    assert row["TOTAL_RECOVERIES"] == pytest.approx(-171_000.0)  # disclosed negative
+    assert row["TOTAL_EXPENSES_SUM"] == pytest.approx(12_000.0)  # disclosed positive
     assert row["RECONSTRUCTED_LOSS"] == pytest.approx(row["ACTUAL_LOSS_CALCULATION"], abs=0.01)
     assert row["LOSS_SEVERITY"] == pytest.approx(47_500.0 / 198_500.0, rel=1e-6)
 

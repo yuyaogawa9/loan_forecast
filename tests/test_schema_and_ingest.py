@@ -115,7 +115,7 @@ def test_net_sale_proceeds_codes_are_preserved_and_split(bronze):
     # A coded row has no numeric amount, and a numeric row has no code.
     assert codes["NET_SALE_PROCEEDS_AMT"].null_count() == codes.height
     numeric = p.filter(pl.col("NET_SALE_PROCEEDS_AMT").is_not_null())
-    assert numeric["NET_SALE_PROCEEDS_AMT"].to_list() == [150000.0]
+    assert numeric["NET_SALE_PROCEEDS_AMT"].to_list() == [-150000.0]  # disclosed negative
     assert numeric["NET_SALE_PROCEEDS_CODE"].null_count() == numeric.height
 
 

@@ -133,9 +133,23 @@ def gate_vintage_consistency(settings: Settings, dataset: str, year: int) -> Gat
     )
 
 
-def gate_loan_age_monotonic(settings: Settings, year: int) -> GateResult:
+def gate_loan_age_monotonic(
+    settings: Settings, year: int, max_unexplained_rate: float = 0.001
+) -> GateResult:
+    """Reporting period must strictly increase; LOAN_AGE may legitimately reset.
+
+    Freddie re-ages a loan when it is modified, so LOAN_AGE genuinely goes
+    backwards on modification months -- empirically 3,791 of 3,796 age
+    decreases in the 2007 vintage carry MODIFICATION_FLAG='Y'. Treating that as
+    corruption was wrong; only an age reset with NO modification is suspicious.
+
+    Period monotonicity, by contrast, is a hard invariant: duplicate or
+    out-of-order months within a loan would silently corrupt every lag.
+    """
     lf = scan_dataset(settings.bronze / "performance").filter(pl.col("vintage_year") == year)
-    n_bad = (
+    # "Ever modified", not "modified this month": the re-aging is not always
+    # reported in the same row as the modification flag.
+    diffs = (
         lf.sort(["LOAN_SEQUENCE_NUMBER", "MONTHLY_REPORTING_PERIOD"])
         .with_columns(
             pl.col("LOAN_AGE").diff().over("LOAN_SEQUENCE_NUMBER").alias("_d_age"),
@@ -144,19 +158,49 @@ def gate_loan_age_monotonic(settings: Settings, year: int) -> GateResult:
             .diff()
             .over("LOAN_SEQUENCE_NUMBER")
             .alias("_d_period"),
+            pl.col("MODIFICATION_FLAG")
+            .is_in(["Y", "P"])
+            .fill_null(False)
+            .any()
+            .over("LOAN_SEQUENCE_NUMBER")
+            .alias("_ever_modified"),
         )
-        .filter((pl.col("_d_age") < 0) | (pl.col("_d_period") <= 0))
-        .select(pl.len())
-        .collect()
-        .item()
     )
-    ok = n_bad == 0
+    stats = (
+        diffs.select(
+            pl.col("LOAN_SEQUENCE_NUMBER").n_unique().alias("loans"),
+            (pl.col("_d_period") <= 0).sum().alias("period_violations"),
+            ((pl.col("_d_age") < 0)).sum().alias("age_resets_total"),
+            ((pl.col("_d_age") < 0) & ~pl.col("_ever_modified"))
+            .sum()
+            .alias("unexplained_age_resets"),
+        )
+        .collect()
+        .to_dicts()[0]
+    )
+
+    # Period monotonicity is a hard invariant -- a duplicate or out-of-order
+    # month would silently corrupt every lagged feature. Unexplained age resets
+    # are judged as a rate: a handful of odd loans is a source-data quirk, not a
+    # reason to block the build, but a systematic pattern is.
+    unexplained_rate = stats["unexplained_age_resets"] / max(stats["loans"], 1)
+    hard_fail = stats["period_violations"] > 0 or unexplained_rate > max_unexplained_rate
+    ok = stats["period_violations"] == 0 and stats["unexplained_age_resets"] == 0
+
+    detail = ""
+    if not ok:
+        detail = (
+            f"{stats['period_violations']} non-increasing period(s); "
+            f"{stats['unexplained_age_resets']} age reset(s) on never-modified loans "
+            f"({unexplained_rate:.4%} of loans; "
+            f"{stats['age_resets_total']:,} resets total, the rest explained by modification)"
+        )
     return GateResult(
         "loan_age_monotonic",
         ok,
-        ERROR,
-        "" if ok else f"{n_bad} row(s) with decreasing LOAN_AGE or non-increasing period",
-        metrics={"bad_rows": n_bad},
+        ERROR if hard_fail else WARNING,
+        detail,
+        metrics={**stats, "unexplained_rate": unexplained_rate},
     )
 
 
@@ -396,22 +440,58 @@ def gate_macro_coverage(settings: Settings, year: int, min_coverage: float = 0.9
     if stats["n"] == 0:
         return GateResult("macro_coverage", True, WARNING, "no rows")
 
-    missing_states = (
-        lf.filter(pl.col("UNEMPLOYMENT_STATE").is_null())
-        .select(pl.col("PROPERTY_STATE").unique())
-        .collect()["PROPERTY_STATE"]
-        .to_list()
-    )
     coverage = 1 - stats["n_missing"] / stats["n"]
     known_uncovered = {"GU", "VI"}
-    unexpected = sorted(set(missing_states) - known_uncovered - {None})
-    ok = coverage >= min_coverage and not unexpected
+
+    # Per-state coverage, not merely "appeared among the null rows". FRED
+    # carries occasional null observations -- the COVID-era BLS gaps and the
+    # newest first-release months -- so almost every state shows up in a list of
+    # null rows while still being ~100% covered. Only a state with essentially
+    # NO macro data is a real failure.
+    per_state = (
+        lf.group_by("PROPERTY_STATE")
+        .agg(
+            pl.len().alias("n"),
+            pl.col("UNEMPLOYMENT_STATE").is_null().sum().alias("n_missing"),
+        )
+        .with_columns((1 - pl.col("n_missing") / pl.col("n")).alias("coverage"))
+        .collect()
+    )
+    uncovered = sorted(
+        r["PROPERTY_STATE"]
+        for r in per_state.filter(pl.col("coverage") < 0.5).to_dicts()
+        if r["PROPERTY_STATE"] not in known_uncovered and r["PROPERTY_STATE"] is not None
+    )
+    sparse_gaps = int(
+        per_state.filter(
+            ~pl.col("PROPERTY_STATE").is_in(list(known_uncovered))
+        )["n_missing"].sum()
+    )
+
+    ok = coverage >= min_coverage and not uncovered
+    detail = ""
+    if not ok:
+        parts = []
+        if uncovered:
+            parts.append(f"states with no macro coverage: {uncovered}")
+        if coverage < min_coverage:
+            parts.append(
+                f"coverage {coverage:.2%} below {min_coverage:.0%} "
+                f"({sparse_gaps:,} rows lost to FRED value gaps, "
+                f"{stats['n_missing'] - sparse_gaps:,} to GU/VI)"
+            )
+        detail = "; ".join(parts)
+
     return GateResult(
         "macro_coverage",
         ok,
-        ERROR if unexpected else WARNING,
-        "" if ok else f"coverage {coverage:.2%}; unexpected states without macro data: {unexpected}",
-        metrics={"coverage": coverage, "unexpected_states": unexpected},
+        ERROR if uncovered else WARNING,
+        detail,
+        metrics={
+            "coverage": coverage,
+            "uncovered_states": uncovered,
+            "fred_value_gap_rows": sparse_gaps,
+        },
     )
 
 

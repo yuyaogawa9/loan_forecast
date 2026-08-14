@@ -1,13 +1,21 @@
 """Recoveries, loss and severity (LGD).
 
-Freddie's sign conventions are the trap here: expenses are disclosed as
-NEGATIVE numbers, recoveries as positive, and ACTUAL_LOSS_CALCULATION as
-negative when a loss occurred. Getting one of those backwards produces a
-plausible-looking severity that is simply wrong, which is why the loss is
-reconstructed independently and reconciled against Freddie's own figure in
-``validate.gate_severity_reconciliation``:
+Sign conventions, verified against the actual Release 47 data rather than
+assumed -- an earlier version of this module had all three backwards, which the
+reconciliation gate caught:
 
-    loss = defaulted UPB + delinquent accrued interest + |expenses| - recoveries
+    recoveries              NEGATIVE (they reduce the loss)
+    expenses                POSITIVE (they increase it)
+    ACTUAL_LOSS_CALCULATION POSITIVE when a loss occurred
+
+Because recoveries already carry their own sign, the reconstruction is a plain
+sum with no negation anywhere:
+
+    loss = ZERO_BALANCE_REMOVAL + DELINQUENT_ACCRUED_INTEREST
+         + TOTAL_EXPENSES + TOTAL_RECOVERIES
+
+That reproduces Freddie's own figure exactly -- to the cent, not merely within
+tolerance -- which is what ``validate.gate_severity_reconciliation`` asserts.
 
 NET_SALE_PROCEEDS carries the non-numeric codes C and U. "C" means proceeds
 covered the loss; "U" means the amount is unknown. In neither case is a numeric
@@ -36,11 +44,13 @@ def with_severity(lf: pl.LazyFrame) -> pl.LazyFrame:
     )
 
     lf = lf.with_columns(
+        # Signed as disclosed (negative). Do NOT flip: the reconstruction below
+        # relies on them carrying their own sign.
         pl.sum_horizontal([pl.col(c).fill_null(0.0) for c in RECOVERY_COMPONENTS])
         .alias("TOTAL_RECOVERIES"),
         # Prefer Freddie's own total; fall back to the components when absent.
+        # No .abs() -- expenses are disclosed positive and add to the loss.
         pl.coalesce(pl.col("TOTAL_EXPENSES"), component_expenses)
-        .abs()
         .alias("TOTAL_EXPENSES_SUM"),
     )
 
@@ -48,11 +58,11 @@ def with_severity(lf: pl.LazyFrame) -> pl.LazyFrame:
     disposed = pl.col("ZERO_BALANCE_REMOVAL").is_not_null() & pl.col("IS_TERMINAL")
     proceeds_usable = pl.col("NET_SALE_PROCEEDS_CODE").is_null()
 
-    reconstructed = -(
+    reconstructed = (
         pl.col("ZERO_BALANCE_REMOVAL").fill_null(0.0)
         + pl.col("DELINQUENT_ACCRUED_INTEREST").fill_null(0.0)
         + pl.col("TOTAL_EXPENSES_SUM").fill_null(0.0)
-        - pl.col("TOTAL_RECOVERIES")
+        + pl.col("TOTAL_RECOVERIES")
     )
 
     lf = lf.with_columns(
@@ -60,8 +70,10 @@ def with_severity(lf: pl.LazyFrame) -> pl.LazyFrame:
         .then(reconstructed)
         .otherwise(pl.lit(None, pl.Float64))
         .alias("RECONSTRUCTED_LOSS"),
-        pl.when(disposed)
-        .then(pl.col("TOTAL_RECOVERIES") / pl.col("ZERO_BALANCE_REMOVAL"))
+        # Negated so a recovery rate reads as a positive fraction of the
+        # defaulted balance, the conventional orientation.
+        pl.when(disposed & (pl.col("ZERO_BALANCE_REMOVAL") > 0))
+        .then(-pl.col("TOTAL_RECOVERIES") / pl.col("ZERO_BALANCE_REMOVAL"))
         .otherwise(pl.lit(None, pl.Float64))
         .alias("RECOVERY_RATE"),
         pl.when(pl.col("NET_SALE_PROCEEDS_CODE") == "C")
@@ -74,9 +86,10 @@ def with_severity(lf: pl.LazyFrame) -> pl.LazyFrame:
         .alias("RECOVERY_QUALITY"),
     )
 
-    # Severity uses Freddie's disclosed loss as ground truth. Negated so a loss
-    # is a positive severity, and only defined where a loss actually occurred.
-    loss_amount = -pl.col("ACTUAL_LOSS_CALCULATION")
+    # Freddie's disclosed loss is already positive when a loss occurred, so it
+    # is used as-is. Severity is therefore a positive fraction of the defaulted
+    # balance, and a negative value means the disposition produced a gain.
+    loss_amount = pl.col("ACTUAL_LOSS_CALCULATION")
     lf = lf.with_columns(
         pl.when(
             disposed
@@ -87,7 +100,7 @@ def with_severity(lf: pl.LazyFrame) -> pl.LazyFrame:
         .otherwise(pl.lit(None, pl.Float64))
         .alias("LOSS_SEVERITY"),
         pl.when(disposed)
-        .then(loss_amount.clip(lower_bound=0.0))
+        .then(loss_amount)
         .otherwise(pl.lit(None, pl.Float64))
         .alias("LOSS_AMOUNT"),
     )
