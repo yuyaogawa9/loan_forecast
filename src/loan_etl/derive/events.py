@@ -87,6 +87,116 @@ def with_event_flags(lf: pl.LazyFrame) -> pl.LazyFrame:
     return lf
 
 
+def with_panel_state(
+    lf: pl.LazyFrame,
+    *,
+    loan_key: str = "LOAN_SEQUENCE_NUMBER",
+    order_key: str = "MONTHLY_REPORTING_PERIOD",
+) -> pl.LazyFrame:
+    """Lagged loan state: what was known at the START of each month.
+
+    This is the difference between a panel you can model and one you cannot.
+    ``CURRENT_LOAN_DELINQUENCY_STATUS`` at month t is the *outcome* of month t,
+    so using it to predict ``IS_DLQ_30`` at t is just reading the answer. Every
+    column here is shifted or cumulative-through-t-1, so it is safe as a feature
+    for an event occurring during t.
+
+    Anything not prefixed PRIOR_ is still causal: cumulative measures are taken
+    up to and excluding the current month.
+    """
+    over = dict(partition_by=loan_key, order_by=order_key)
+    dlq = pl.col("DLQ_MONTHS")
+    is_dlq = (dlq >= 1).fill_null(False)
+
+    lf = lf.with_columns(
+        dlq.shift(1).over(**over).alias("PRIOR_DLQ_MONTHS"),
+        pl.col("CURRENT_LOAN_DELINQUENCY_STATUS").shift(1).over(**over).alias("PRIOR_DLQ_STATUS"),
+        pl.col("IS_MODIFIED").shift(1).over(**over).alias("PRIOR_IS_MODIFIED"),
+        # cum_max includes the current row, so shift afterwards to exclude it.
+        dlq.fill_null(0).cum_max().over(**over).shift(1).over(**over).alias("MAX_DLQ_MONTHS_TO_DATE"),
+        is_dlq.cum_sum().over(**over).shift(1).over(**over).alias("N_DLQ_MONTHS_TO_DATE"),
+    )
+
+    # Consecutive delinquent months ending at t-1. The reset counter increments
+    # on every current month, so each delinquency spell forms its own group and
+    # a running count within that group is the spell length.
+    reset = (~is_dlq).cum_sum().over(**over)
+    lf = lf.with_columns(reset.alias("_DLQ_SPELL_ID"))
+    lf = lf.with_columns(
+        is_dlq.cast(pl.Int32)
+        .cum_sum()
+        .over(partition_by=[loan_key, "_DLQ_SPELL_ID"], order_by=order_key)
+        .shift(1)
+        .over(**over)
+        .fill_null(0)
+        .alias("PRIOR_DLQ_RUN_LENGTH")
+    )
+
+    # Age at first delinquency, used only where it strictly precedes this month
+    # -- otherwise it would be reading a future event.
+    first_dlq_age = pl.col("LOAN_AGE").filter(is_dlq).min().over(partition_by=loan_key)
+    lf = lf.with_columns(
+        pl.when(first_dlq_age < pl.col("LOAN_AGE"))
+        .then(pl.col("LOAN_AGE") - first_dlq_age)
+        .otherwise(pl.lit(None, pl.Int32))
+        .alias("MONTHS_SINCE_FIRST_DLQ")
+    )
+
+    lf = lf.with_columns(
+        (pl.col("MAX_DLQ_MONTHS_TO_DATE") >= 1).fill_null(False).alias("EVER_DLQ_30_TO_DATE"),
+        (pl.col("MAX_DLQ_MONTHS_TO_DATE") >= 3).fill_null(False).alias("EVER_DLQ_90_TO_DATE"),
+        (pl.col("PRIOR_UPB") / pl.col("ORIGINAL_UPB")).alias("PRIOR_POOL_FACTOR"),
+        pl.col("PRIOR_UPB").is_null().alias("IS_FIRST_OBSERVATION"),
+        # Rows whose lagged features exist. Hazard models should filter on this;
+        # the first observation of each loan has no prior state by construction.
+        pl.col("PRIOR_UPB").is_not_null().alias("IS_MODELABLE"),
+    )
+    return lf.drop("_DLQ_SPELL_ID")
+
+
+def with_event_label(lf: pl.LazyFrame) -> pl.LazyFrame:
+    """One mutually-exclusive outcome per loan-month, for competing risks.
+
+    The boolean flags overlap by design (a charge-off is also a credit event and
+    may also be seriously delinquent), which is fine for binary models but
+    unusable for a multinomial or competing-risks fit. These three columns give
+    a single label at three granularities.
+    """
+    lf = lf.with_columns(
+        pl.when(pl.col("IS_REO_ACQUISITION"))
+        .then(pl.lit("REO"))
+        .when(pl.col("DLQ_MONTHS") >= 3)
+        .then(pl.lit("DLQ_90_PLUS"))
+        .when(pl.col("DLQ_MONTHS") == 2)
+        .then(pl.lit("DLQ_60"))
+        .when(pl.col("DLQ_MONTHS") == 1)
+        .then(pl.lit("DLQ_30"))
+        .when(pl.col("DLQ_MONTHS") == 0)
+        .then(pl.lit("CURRENT"))
+        .otherwise(pl.lit(None, pl.Utf8))
+        .alias("DLQ_STATE"),
+        pl.when(pl.col("IS_CENSORED"))
+        .then(pl.lit("CENSORED"))
+        .when(pl.col("IS_CHARGEOFF"))
+        .then(pl.lit("CHARGEOFF"))
+        .when(pl.col("IS_REO_DISPOSITION"))
+        .then(pl.lit("REO_DISPOSITION"))
+        .when(pl.col("IS_CREDIT_EVENT"))
+        .then(pl.lit("CREDIT_EVENT_OTHER"))
+        .when(pl.col("IS_PREPAID_FULL"))
+        .then(pl.lit("PREPAID"))
+        .when(pl.col("IS_MATURED"))
+        .then(pl.lit("MATURED"))
+        .otherwise(pl.lit(None, pl.Utf8))
+        .alias("EVENT_TERMINAL"),
+    )
+    # Terminal events win: a loan that pays off while 30 days down is a
+    # prepayment, not a delinquency observation.
+    return lf.with_columns(
+        pl.coalesce(pl.col("EVENT_TERMINAL"), pl.col("DLQ_STATE"), pl.lit("UNKNOWN")).alias("EVENT")
+    )
+
+
 def _first_period_where(flag: str, alias: str) -> pl.Expr:
     return (
         pl.col("MONTHLY_REPORTING_PERIOD")

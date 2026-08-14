@@ -1,0 +1,248 @@
+# Column role registry for the curated loan-month panel.
+#
+# WHY THIS EXISTS
+# ---------------
+# The panel deliberately keeps every field, including ones that only become
+# populated at or after loan termination. That is right for auditing and for
+# building loss/severity targets, but it makes the raw panel dangerous to hand
+# straight to a model: training IS_DEFAULT on a frame containing
+# ACTUAL_LOSS_CALCULATION or ZERO_BALANCE_CODE yields a perfect and completely
+# useless model.
+#
+# So every column carries a role, and `features.select` only ever returns
+# feature roles. Roles are resolved in the precedence order below; the first
+# match wins. Any panel column matching nothing is `unclassified`, and a
+# validation gate fails on that -- which forces this file to stay in sync as
+# the panel grows.
+#
+# THE KEY DISTINCTION is timing, not topic:
+#   feature_*  -- known at the START of month t (static, lagged, or macro
+#                 already published)
+#   target     -- describes what happened DURING month t
+#   leakage    -- contemporaneous with, or downstream of, the outcome
+
+precedence:
+  - identifier
+  - metadata
+  - target
+  - leakage
+  - feature_macro
+  - feature_dynamic
+  - feature_static
+
+roles:
+
+  identifier:
+    exact:
+      - LOAN_SEQUENCE_NUMBER
+      - MONTHLY_REPORTING_PERIOD
+      - vintage_year
+      - LOAN_VINTAGE_YEAR
+      - LOAN_VINTAGE_QUARTER
+    patterns:
+      - '_DT$'          # Date twins of the YYYYMM strings
+
+  metadata:
+    exact:
+      - IS_MODELABLE
+      - IS_FIRST_OBSERVATION
+      - CURTAILMENT_RELIABLE
+      - CURTAILMENT_THRESHOLD
+      - RECOVERY_QUALITY
+      - NET_SALE_PROCEEDS_CODE
+      - PRE_RELIEF_REFINANCE_LOAN_SEQUENCE_NUMBER
+      - UNMAPPED_FIELD_35
+      # Raw YYYYMM strings. Useless as features and ruinous as categoricals
+      # (hundreds of levels), and fully redundant: origination timing is carried
+      # by ORIGINATION_YEAR/MONTH, and time-to-maturity by LOAN_AGE and
+      # REMAINING_MONTHS_TO_LEGAL_MATURITY.
+      - FIRST_PAYMENT_DATE
+      - MATURITY_DATE
+
+  target:
+    exact:
+      # Delinquency ladder
+      - IS_DLQ_30
+      - IS_DLQ_60
+      - IS_DLQ_90
+      - IS_SDQ
+      - DELINQUENT
+      # Default / credit events
+      - IS_DEFAULT
+      - IS_CREDIT_EVENT
+      - IS_CHARGEOFF
+      - IS_REO_DISPOSITION
+      - IS_REO_ACQUISITION
+      - IS_CENSORED
+      - IS_TERMINAL
+      # Prepayment
+      - IS_PREPAID_FULL
+      - IS_MATURED
+      - PREPAID
+      - IS_PARTIAL_PREPAYMENT
+      - CURTAILMENT
+      - SMM
+      - CPR
+      # Payment behaviour
+      - IS_SCHEDULED_PAYMENT
+      - PAYMENT_OUTCOME
+      - ACTUAL_PRINCIPAL
+      # Loss given default
+      - LOSS_SEVERITY
+      - LOSS_AMOUNT
+      - RECOVERY_RATE
+      - TOTAL_RECOVERIES
+      # Competing-risks labels
+      - EVENT
+      - EVENT_TERMINAL
+      - DLQ_STATE
+
+  leakage:
+    exact:
+      # Contemporaneous state: these ARE the month-t outcome, restated.
+      - CURRENT_LOAN_DELINQUENCY_STATUS
+      - DLQ_MONTHS
+      - CURRENT_ACTUAL_UPB
+      - INTEREST_BEARING_UPB
+      - CURRENT_NON_INTEREST_BEARING_UPB
+      - DUE_DATE_OF_LAST_PAID_INSTALLMENT
+      # Termination: only ever populated on the final record.
+      - ZERO_BALANCE_CODE
+      - ZERO_BALANCE_EFFECTIVE_DATE
+      - ZERO_BALANCE_REMOVAL
+      - DEFECT_SETTLEMENT_DATE
+      # Loss-workout detail: populated at or after disposition.
+      - MI_RECOVERIES
+      - NON_MI_RECOVERIES
+      - NET_SALE_PROCEEDS
+      - NET_SALE_PROCEEDS_AMT
+      - TOTAL_EXPENSES
+      - TOTAL_EXPENSES_SUM
+      - LEGAL_COSTS
+      - MAINTENANCE_AND_PRESERVATION_COSTS
+      - TAXES_AND_INSURANCE
+      - MISCELLANEOUS_EXPENSES
+      - ACTUAL_LOSS_CALCULATION
+      - RECONSTRUCTED_LOSS
+      - DELINQUENT_ACCRUED_INTEREST
+      - CUMULATIVE_MODIFICATION_COST
+      - CURRENT_MONTH_MODIFICATION_COST
+      # Loss-mitigation state reported in the same month it takes effect.
+      - MODIFICATION_FLAG
+      - IS_MODIFIED
+      - STEP_MODIFICATION_FLAG
+      - PAYMENT_DEFERRAL
+      - BORROWER_ASSISTANCE_STATUS_CODE
+      - DELINQUENCY_DUE_TO_DISASTER
+
+  feature_macro:
+    exact:
+      - INTEREST_RATE_DIFF
+    patterns:
+      - '^UNEMPLOYMENT'
+      - '^MORTGAGE_RATE'
+      - '^TREASURY_'
+      - '^CPI$'
+      - '^REAL_GDP$'
+      - '^RECESSION_'
+
+  feature_dynamic:
+    exact:
+      - LOAN_AGE
+      - REMAINING_MONTHS_TO_LEGAL_MATURITY
+      - ESTIMATED_LOAN_TO_VALUE
+      - SCHEDULED_UPB_AT_ORIGINATION_TERMS
+      - SCHEDULED_PRINCIPAL
+      - SCHEDULED_INTEREST
+      - SCHEDULED_PAYMENT
+      - MAX_DLQ_MONTHS_TO_DATE
+      - N_DLQ_MONTHS_TO_DATE
+      - MONTHS_SINCE_FIRST_DLQ
+      - EVER_DLQ_30_TO_DATE
+      - EVER_DLQ_90_TO_DATE
+      # Note rate is fixed for the life of an FRM and therefore known in
+      # advance. It only moves on modification, which is itself flagged as
+      # leakage -- so treat a rate change as a signal you already used.
+      - CURRENT_INTEREST_RATE
+      # Both moved to the performance file and are genuinely time-varying:
+      # servicing transfers, and MI cancels once LTV falls far enough.
+      - SERVICER_NAME
+      - MI_CANCELLATION_INDICATOR
+    patterns:
+      - '^PRIOR_'       # every lagged state column, by construction
+
+  feature_static:
+    exact:
+      - CREDIT_SCORE
+      - FIRST_TIME_HOMEBUYER_FLAG
+      - METROPOLITAN_DIVISION
+      - MORTGAGE_INSURANCE_PERCENTAGE
+      - NUMBER_OF_UNITS
+      - OCCUPANCY_STATUS
+      - ORIGINAL_COMBINED_LOAN_TO_VALUE
+      - ORIGINAL_DEBT_TO_INCOME
+      - ORIGINAL_UPB
+      - ORIGINAL_LOAN_TO_VALUE
+      - ORIGINAL_INTEREST_RATE
+      - ORIGINAL_LOAN_TERM
+      - CHANNEL
+      - PREPAYMENT_PENALTY_MORTGAGE
+      - AMORTIZATION_TYPE
+      - PROPERTY_STATE
+      - PROPERTY_TYPE
+      - POSTAL_CODE
+      - LOAN_PURPOSE
+      - NUMBER_OF_BORROWERS
+      - SELLER_NAME
+      - SUPER_CONFORMING_FLAG
+      - PROGRAM_INDICATOR
+      - RELIEF_REFINANCE_INDICATOR
+      - PROPERTY_VALUATION_METHOD
+      - INTEREST_ONLY_INDICATOR
+      - VANTAGE_SCORE
+      - ORIGINATION_YEAR
+      - ORIGINATION_MONTH
+
+# Convenience target groups, so callers can ask for "the prepayment targets"
+# rather than restating column names.
+target_groups:
+  delinquency_30: IS_DLQ_30
+  delinquency_60: IS_DLQ_60
+  delinquency_90: IS_DLQ_90
+  serious_delinquency: IS_SDQ
+  default: IS_DEFAULT
+  chargeoff: IS_CHARGEOFF
+  prepayment: IS_PREPAID_FULL
+  partial_prepayment: IS_PARTIAL_PREPAYMENT
+  curtailment_amount: CURTAILMENT
+  scheduled_payment: IS_SCHEDULED_PAYMENT
+  recovery_rate: RECOVERY_RATE
+  loss_severity: LOSS_SEVERITY
+  competing_risks: EVENT
+
+# Categorical features needing encoding before most model families.
+#
+# This list is a SUPPLEMENT, not the authority. `features.training_frame`
+# derives the categorical set from actual dtypes -- every Utf8 feature is
+# encoded whether or not it appears here -- because a hand-maintained list
+# silently misses new string columns and one leftover string makes XGBoost
+# reject the entire frame. Add entries here only for columns that are stored
+# numerically but should still be treated as unordered categories.
+categorical_features:
+  - PROPERTY_STATE
+  - PROPERTY_TYPE
+  - OCCUPANCY_STATUS
+  - CHANNEL
+  - LOAN_PURPOSE
+  - SELLER_NAME
+  - SERVICER_NAME
+  - FIRST_TIME_HOMEBUYER_FLAG
+  - PROGRAM_INDICATOR
+  - PROPERTY_VALUATION_METHOD
+  - INTEREST_ONLY_INDICATOR
+  - AMORTIZATION_TYPE
+  - PRIOR_DLQ_STATUS
+  - METROPOLITAN_DIVISION
+  - POSTAL_CODE
+# ORIGINATION_YEAR / ORIGINATION_MONTH are deliberately NOT categorical -- they
+# are cast to integers in the panel so vintage effects stay ordered.

@@ -22,7 +22,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from loan_etl.acquire.freddie import discover_vintages, inspect_raw  # noqa: E402
 from loan_etl.clean.ingest import DATASETS, ingest_vintage  # noqa: E402
 from loan_etl.derive.panel import build_loan_month, build_outcomes  # noqa: E402
-from loan_etl.io import free_disk_gb  # noqa: E402
+from loan_etl.io import DataLakeBusy, data_lock, free_disk_gb  # noqa: E402
 from loan_etl.settings import ConfigError, get_settings  # noqa: E402
 from loan_etl.validate import (  # noqa: E402
     ERROR,
@@ -80,6 +80,11 @@ def main(argv: list[str] | None = None) -> int:
         help="include retroactively-dated series such as the NBER recession indicator",
     )
     ap.add_argument("--no-fail", action="store_true", help="report gate failures without exiting 1")
+    ap.add_argument(
+        "--force-unlock",
+        action="store_true",
+        help="ignore an existing lock (only if you are sure no other build is running)",
+    )
     args = ap.parse_args(argv)
 
     try:
@@ -89,6 +94,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     settings.ensure_dirs()
 
+    try:
+        with data_lock(settings.data_root, force=args.force_unlock):
+            return _run_stages(args, settings)
+    except DataLakeBusy as exc:
+        print(f"\n{exc}", file=sys.stderr)
+        return 3
+
+
+def _run_stages(args, settings) -> int:
     available = discover_vintages(settings.raw_freddie)
     years = (
         parse_vintages(args.vintages, available)

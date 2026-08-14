@@ -65,6 +65,80 @@ run/build_dataset.py  CLI orchestrator
 functions/loan_xgb.py modelling helpers (unchanged)
 ```
 
+## Modelling from the panel
+
+`curated/loan_month` is a discrete-time hazard panel: one row per loan per
+reporting month, 129 columns. Never train on it directly — it deliberately
+retains post-outcome fields. Go through `features`, which enforces the split:
+
+```python
+import polars as pl
+from loan_etl.settings import get_settings
+from loan_etl.io import scan_dataset
+from loan_etl.features import training_frame
+
+s = get_settings()
+panel = scan_dataset(s.curated / "loan_month")
+
+lf, cols = training_frame(panel, "default")     # safe features only; 31 leakage columns blocked
+train = lf.filter(pl.col("MONTHLY_REPORTING_PERIOD").str.slice(0, 4) <= "2021").collect()
+
+import xgboost as xgb
+model = xgb.XGBClassifier(enable_categorical=True, tree_method="hist")
+model.fit(train.select(cols.features).to_pandas(), train[cols.target].to_pandas())
+```
+
+`training_frame` returns a frame XGBoost accepts directly: string features are
+cast to `pl.Categorical` (derived from dtype, so none can be missed), and
+degenerate features — entirely null or constant — are dropped and listed in
+`cols.dropped_degenerate`. That drop is not cosmetic: an all-null categorical
+has zero levels and XGBoost's categorical path *raises* on it, and fields added
+in later releases (`PROPERTY_VALUATION_METHOD`, `SUPER_CONFORMING_FLAG`) are
+null for every loan in early vintages.
+
+**Prior delinquency will dominate any delinquency model**, because delinquency
+persists — a loan 60 days down is overwhelmingly likely to be 90 days down next
+month. That produces a high AUC carrying little credit-risk signal. Condition on
+the starting state instead:
+
+```python
+from loan_etl.features import starting_state
+new_dlq = starting_state(panel, "0")     # loans that were current last month
+```
+
+Available targets: `delinquency_30`, `delinquency_60`, `delinquency_90`,
+`serious_delinquency`, `default`, `chargeoff`, `prepayment`,
+`partial_prepayment`, `curtailment_amount`, `scheduled_payment`,
+`recovery_rate`, `loss_severity`, and `competing_risks` (the mutually-exclusive
+`EVENT` label: `CURRENT` / `DLQ_30` / `DLQ_60` / `DLQ_90_PLUS` / `REO` /
+`PREPAID` / `MATURED` / `CHARGEOFF` / `REO_DISPOSITION` / `CREDIT_EVENT_OTHER` /
+`CENSORED`).
+
+Every column carries a role in `config/schemas/columns.yaml`:
+
+| Role | Meaning |
+|---|---|
+| `feature_static` (32) | Origination attributes — fixed for the life of the loan |
+| `feature_dynamic` (19) | Known at the **start** of month *t*: `PRIOR_*` lags, `MAX_DLQ_MONTHS_TO_DATE`, `PRIOR_DLQ_RUN_LENGTH`, scheduled P&I |
+| `feature_macro` (9) | Published and available by month *t* |
+| `target` (29) | Describes what happened **during** month *t* |
+| `leakage` (31) | Contemporaneous with or downstream of the outcome |
+| `identifier` / `metadata` (18) | Keys and build diagnostics |
+
+The distinction is **timing, not topic**. `CURRENT_LOAN_DELINQUENCY_STATUS` at
+*t* is the month-*t* outcome restated, so it is leakage; `PRIOR_DLQ_MONTHS` is
+the same information lagged, and is a feature. Likewise `CURRENT_ACTUAL_UPB` is
+leakage while `PRIOR_UPB` is not.
+
+Three gates enforce this: `all_columns_classified` fails on any column the
+registry doesn't describe (so the panel can't grow past the registry),
+`features_exclude_leakage` re-checks every declared target, and
+`lagged_state_is_causal` verifies each `PRIOR_*` value really equals the prior
+month's within the same loan.
+
+`training_frame` filters to `IS_MODELABLE` by default, dropping each loan's
+first observation — it has no lagged state by construction.
+
 ## Design notes
 
 **Schema as data.** Field positions, dtypes, sentinels and valid ranges live in

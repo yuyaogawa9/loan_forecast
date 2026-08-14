@@ -1,5 +1,5 @@
 # Freddie Mac Single-Family Loan-Level Dataset -- Monthly Performance Data File
-# Layout version 47 (July 2026 release). Headerless, pipe-delimited, 32 fields.
+# Layout version 47 (July 2026 release). Headerless, pipe-delimited, 35 fields.
 #
 # Every field is retained. The loss/expense/recovery columns are ~99.5% null and
 # compress to almost nothing under zstd, so keeping them is nearly free -- and
@@ -11,7 +11,7 @@
 
 version: 47
 dataset: performance
-field_count: 32
+field_count: 35
 separator: "|"
 has_header: false
 
@@ -230,3 +230,32 @@ fields:
     name: INTEREST_BEARING_UPB
     dtype: Float64
     nulls: [""]
+  - pos: 33
+    name: MI_CANCELLATION_INDICATOR
+    dtype: Utf8
+    nulls: ["7", "9", ""]
+    enum: ["Y", "N"]
+    desc: >
+      Lives in the PERFORMANCE file in this release, not origination. 7 = not
+      applicable (no MI), which is why it dominates the distribution.
+
+  - pos: 34
+    name: SERVICER_NAME
+    dtype: Utf8
+    nulls: [""]
+    desc: >
+      Also moved from origination to performance -- correctly, since servicing
+      transfers over a loan's life, so this is time-varying rather than a fixed
+      origination attribute. "OTHER" is a real aggregated category.
+
+  - pos: 35
+    name: UNMAPPED_FIELD_35
+    dtype: Float64
+    nulls: [""]
+    verify: true
+    desc: >
+      Added by a recent release; identity not yet confirmed. Empirically: blank
+      throughout 1999, increasingly populated in later vintages, and always
+      exactly "0.00" when present -- so it carries no signal in this sample and
+      is classified as metadata rather than a feature. Rename once checked
+      against the Release 47 file layout.

@@ -177,6 +177,15 @@ def with_amortization(
         ).fill_null(False).alias("CURTAILMENT_RELIABLE"),
     )
 
+    # Scheduled interest and the full scheduled P&I payment. Both are modelling
+    # targets in their own right and the denominator for payment-behaviour work.
+    lf = lf.with_columns(
+        (pl.col("PRIOR_UPB") * pl.col("PRIOR_RATE") / 1200.0).alias("SCHEDULED_INTEREST")
+    )
+    lf = lf.with_columns(
+        (pl.col("SCHEDULED_INTEREST") + pl.col("SCHEDULED_PRINCIPAL")).alias("SCHEDULED_PAYMENT")
+    )
+
     lf = lf.with_columns(
         pl.max_horizontal(
             pl.lit(abs_floor), pl.col("PRIOR_UPB").fill_null(0.0) * rel_floor
@@ -198,5 +207,25 @@ def with_amortization(
         is_material.alias("IS_PARTIAL_PREPAYMENT"),
     )
     lf = lf.with_columns((1.0 - (1.0 - pl.col("SMM")).pow(MONTHS_PER_YEAR)).alias("CPR"))
+
+    # Payment behaviour as a single mutually-exclusive outcome. SHORTFALL means
+    # less principal was retired than the schedule required, which is what a
+    # missed or partial payment looks like in balance terms.
+    shortfall = pl.col("ACTUAL_PRINCIPAL") - pl.col("SCHEDULED_PRINCIPAL")
+    lf = lf.with_columns(
+        pl.when(is_terminal)
+        .then(pl.lit("TERMINAL"))
+        .when(pl.col("PRIOR_UPB").is_null())
+        .then(pl.lit("FIRST_OBSERVATION"))
+        .when(pl.col("IS_PARTIAL_PREPAYMENT"))
+        .then(pl.lit("CURTAILED"))
+        .when(shortfall < -pl.col("CURTAILMENT_THRESHOLD"))
+        .then(pl.lit("SHORTFALL"))
+        .otherwise(pl.lit("SCHEDULED"))
+        .alias("PAYMENT_OUTCOME")
+    )
+    lf = lf.with_columns(
+        (pl.col("PAYMENT_OUTCOME") == "SCHEDULED").alias("IS_SCHEDULED_PAYMENT")
+    )
 
     return lf.drop("PRIOR_RATE", "PRIOR_REMAINING_MONTHS")

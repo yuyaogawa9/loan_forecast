@@ -415,8 +415,108 @@ def gate_macro_coverage(settings: Settings, year: int, min_coverage: float = 0.9
     )
 
 
+def gate_all_columns_classified(settings: Settings, year: int) -> GateResult:
+    """Every panel column must have a declared role in columns.yaml.
+
+    An unclassified column is one nobody has decided is safe to train on. Since
+    the panel deliberately carries post-outcome fields, the default must be
+    "refuse", not "assume it's a feature".
+    """
+    from .features import load_registry, unclassified_columns
+
+    cols = scan_dataset(settings.curated / "loan_month").collect_schema().names()
+    stray = unclassified_columns(cols, settings.schema_dir)
+    counts = {
+        role: len(v)
+        for role, v in load_registry(settings.schema_dir).classify(cols).items()
+        if v
+    }
+    return GateResult(
+        "all_columns_classified",
+        not stray,
+        ERROR,
+        "" if not stray else f"{len(stray)} column(s) with no role in columns.yaml: {stray}",
+        metrics={"role_counts": counts, "unclassified": stray},
+    )
+
+
+def gate_features_exclude_leakage(settings: Settings, year: int) -> GateResult:
+    """No target or post-outcome column may survive feature selection.
+
+    The concrete failure this prevents: training a default model on a frame
+    still containing ACTUAL_LOSS_CALCULATION or ZERO_BALANCE_CODE, which
+    produces a flawless in-sample model with no predictive value.
+    """
+    from .features import load_registry, select
+
+    reg = load_registry(settings.schema_dir)
+    cols = scan_dataset(settings.curated / "loan_month").collect_schema().names()
+
+    offenders: dict[str, list[str]] = {}
+    for alias in reg.target_groups:
+        try:
+            sel = select(cols, alias, schema_dir=settings.schema_dir)
+        except Exception as exc:  # target absent from this panel build
+            offenders.setdefault("_unresolvable", []).append(f"{alias}: {exc}")
+            continue
+        bad = [c for c in sel.features if reg.role_of(c) in ("target", "leakage")]
+        if bad:
+            offenders[alias] = bad
+
+    return GateResult(
+        "features_exclude_leakage",
+        not offenders,
+        ERROR,
+        "" if not offenders else f"leakage reached the feature set: {offenders}",
+        metrics={"targets_checked": len(reg.target_groups)},
+    )
+
+
+def gate_lagged_state_is_causal(settings: Settings, year: int) -> GateResult:
+    """PRIOR_DLQ_MONTHS at t must equal DLQ_MONTHS at t-1, within each loan.
+
+    Guards the shift/window logic. A silently mis-partitioned `.over()` would
+    pull the previous *loan's* last month into the current loan's first row.
+    """
+    lf = scan_dataset(settings.curated / "loan_month").filter(pl.col("vintage_year") == year)
+    mismatches = (
+        lf.sort(["LOAN_SEQUENCE_NUMBER", "MONTHLY_REPORTING_PERIOD"])
+        .with_columns(
+            pl.col("DLQ_MONTHS")
+            .shift(1)
+            .over(partition_by="LOAN_SEQUENCE_NUMBER", order_by="MONTHLY_REPORTING_PERIOD")
+            .alias("_expected")
+        )
+        .filter(
+            pl.col("PRIOR_DLQ_MONTHS").is_not_null().or_(pl.col("_expected").is_not_null())
+            & (pl.col("PRIOR_DLQ_MONTHS").ne_missing(pl.col("_expected")))
+        )
+        .select(pl.len())
+        .collect()
+        .item()
+    )
+    # The first row of each loan must have no prior state.
+    leaked_first = (
+        lf.filter(pl.col("IS_FIRST_OBSERVATION") & pl.col("PRIOR_UPB").is_not_null())
+        .select(pl.len())
+        .collect()
+        .item()
+    )
+    ok = mismatches == 0 and leaked_first == 0
+    return GateResult(
+        "lagged_state_is_causal",
+        ok,
+        ERROR,
+        "" if ok else f"{mismatches} lag mismatch(es), {leaked_first} first-row leak(s)",
+        metrics={"lag_mismatches": mismatches, "first_row_leaks": leaked_first},
+    )
+
+
 def validate_curated(settings: Settings, year: int) -> list[GateResult]:
     return [
         gate_severity_reconciliation(settings, year),
         gate_macro_coverage(settings, year),
+        gate_all_columns_classified(settings, year),
+        gate_features_exclude_leakage(settings, year),
+        gate_lagged_state_is_causal(settings, year),
     ]

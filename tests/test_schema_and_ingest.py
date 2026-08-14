@@ -19,12 +19,29 @@ from .conftest import VINTAGE
 # --- schema spec -----------------------------------------------------------
 
 
+# Release 47 field counts, confirmed against the real Clarity downloads:
+# SERVICER_NAME and MI_CANCELLATION_INDICATOR live in the PERFORMANCE file, and
+# a credit-score field is appended to origination.
+EXPECTED_FIELD_COUNTS = {"origination": 31, "performance": 35}
+
+
 @pytest.mark.parametrize("dataset", ["origination", "performance"])
 def test_schema_loads_with_contiguous_positions(dataset):
+    n = EXPECTED_FIELD_COUNTS[dataset]
     s = load_schema(dataset, 47)
-    assert s.field_count == 32
-    assert [f.pos for f in s.fields] == list(range(1, 33))
-    assert len(set(s.names)) == 32
+    assert s.field_count == n
+    assert [f.pos for f in s.fields] == list(range(1, n + 1))
+    assert len(set(s.names)) == n
+
+
+def test_servicer_and_mi_cancellation_are_performance_fields():
+    """They moved out of origination in this release -- servicing transfers, so
+    servicer is time-varying rather than an origination attribute."""
+    orig = load_schema("origination", 47)
+    perf = load_schema("performance", 47)
+    for name in ("SERVICER_NAME", "MI_CANCELLATION_INDICATOR"):
+        assert orig.get(name) is None
+        assert perf.get(name) is not None
 
 
 def test_unknown_schema_version_raises():

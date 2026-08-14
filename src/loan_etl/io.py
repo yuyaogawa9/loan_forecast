@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import polars as pl
 
@@ -71,15 +73,28 @@ def sink_partition(lf: pl.LazyFrame, base: Path, vintage_year: int) -> Path:
     out_dir = partition_dir(base, vintage_year)
     out_dir.mkdir(parents=True, exist_ok=True)
     final = out_dir / "data.parquet"
-    tmp = out_dir / "data.parquet.tmp"
+    # The temp name carries the PID. A shared name means two processes writing
+    # the same partition race: one renames the temp away and the other's
+    # os.replace fails with a confusing FileNotFoundError. data_lock() should
+    # prevent concurrent runs, but the unique name makes the write safe anyway.
+    tmp = out_dir / f"data.parquet.{os.getpid()}.tmp"
 
-    lf.sink_parquet(
-        tmp,
-        compression=PARQUET_COMPRESSION,
-        compression_level=PARQUET_COMPRESSION_LEVEL,
-        row_group_size=ROW_GROUP_SIZE,
-    )
-    tmp.replace(final)
+    try:
+        lf.sink_parquet(
+            tmp,
+            compression=PARQUET_COMPRESSION,
+            compression_level=PARQUET_COMPRESSION_LEVEL,
+            row_group_size=ROW_GROUP_SIZE,
+        )
+        if not tmp.exists():
+            raise RuntimeError(
+                f"sink_parquet reported success but {tmp} is missing. "
+                "Another process may be writing the same data lake."
+            )
+        tmp.replace(final)
+    except BaseException:
+        tmp.unlink(missing_ok=True)   # never leave a partial temp behind
+        raise
     return final
 
 
@@ -144,6 +159,60 @@ def read_manifest(manifest_dir: Path, name: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 # Disk safety
 # ---------------------------------------------------------------------------
+
+
+class DataLakeBusy(RuntimeError):
+    pass
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True   # exists, owned by someone else
+    return True
+
+
+@contextmanager
+def data_lock(data_root: Path, *, force: bool = False) -> Iterator[Path]:
+    """Advisory single-writer lock over a data lake.
+
+    Two concurrent builds against one DATA_ROOT interleave partition writes and
+    corrupt each other's temp files. This makes the second one fail immediately
+    with an explanation instead of halfway through with a stray
+    FileNotFoundError.
+
+    A lock left by a dead process is stale and gets taken over automatically, so
+    a crashed run does not require manual cleanup.
+    """
+    data_root.mkdir(parents=True, exist_ok=True)
+    lock = data_root / ".etl.lock"
+
+    if lock.exists() and not force:
+        try:
+            info = json.loads(lock.read_text())
+        except (json.JSONDecodeError, OSError):
+            info = {}
+        pid = info.get("pid")
+        if isinstance(pid, int) and pid != os.getpid() and _pid_alive(pid):
+            raise DataLakeBusy(
+                f"Another build is already running against {data_root} "
+                f"(pid {pid}, started {info.get('started', 'unknown')}).\n"
+                "Wait for it to finish, stop it, or pass --force-unlock if you "
+                "are certain it is dead."
+            )
+
+    lock.write_text(json.dumps({"pid": os.getpid(), "started": utc_now()}, indent=2))
+    try:
+        yield lock
+    finally:
+        try:
+            if json.loads(lock.read_text()).get("pid") == os.getpid():
+                lock.unlink(missing_ok=True)
+        except (json.JSONDecodeError, OSError):
+            lock.unlink(missing_ok=True)
 
 
 def free_disk_gb(path: Path) -> float:

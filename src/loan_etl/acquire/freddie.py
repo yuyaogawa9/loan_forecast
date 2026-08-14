@@ -28,10 +28,23 @@ from typing import Iterator
 
 from ..io import sha256_file
 
-ORIG_PATTERN = "sample_orig_{year}.txt"
-PERF_PATTERN = "sample_svcg_{year}.txt"
+# Freddie has used more than one name for the monthly performance file across
+# releases. Current Clarity downloads ship `sample_perf_<year>.txt`; older
+# distributions (and the previous loader in this repo) used `sample_svcg_`, and
+# the Standard dataset uses `_time_`. All are accepted, in preference order, so
+# a naming change is not a hard failure.
+ORIG_PATTERNS = ("sample_orig_{year}.txt",)
+PERF_PATTERNS = (
+    "sample_perf_{year}.txt",
+    "sample_svcg_{year}.txt",
+    "sample_time_{year}.txt",
+)
 VINTAGE_DIR_RE = re.compile(r"^sample_(\d{4})$")
 VINTAGE_ZIP_RE = re.compile(r"^sample_(\d{4})\.zip$")
+
+
+def candidate_names(patterns: tuple[str, ...], year: int) -> list[str]:
+    return [p.format(year=year) for p in patterns]
 
 
 class AcquisitionError(RuntimeError):
@@ -75,11 +88,24 @@ def discover_vintages(raw_dir: Path) -> list[int]:
     return sorted(years)
 
 
-def _find_member(names: list[str], wanted: str) -> str | None:
-    """Match a zip member by basename, tolerating nested directories."""
-    for n in names:
-        if Path(n).name.lower() == wanted.lower():
-            return n
+def _find_member(names: list[str], wanted: list[str] | str) -> str | None:
+    """Match a zip member against candidate basenames, in preference order.
+
+    Tolerates nested directories inside the archive and case differences.
+    """
+    candidates = [wanted] if isinstance(wanted, str) else list(wanted)
+    lowered = {Path(n).name.lower(): n for n in names}
+    for c in candidates:
+        if hit := lowered.get(c.lower()):
+            return hit
+    return None
+
+
+def _find_on_disk(directory: Path, candidates: list[str]) -> Path | None:
+    for c in candidates:
+        p = directory / c
+        if p.exists():
+            return p
     return None
 
 
@@ -91,14 +117,14 @@ def materialize_vintage(raw_dir: Path, year: int, keep_extracted: bool = False) 
     unless ``keep_extracted`` is set. Files that were already on disk are never
     deleted -- only files this call created.
     """
-    orig_name = ORIG_PATTERN.format(year=year)
-    perf_name = PERF_PATTERN.format(year=year)
+    orig_names = candidate_names(ORIG_PATTERNS, year)
+    perf_names = candidate_names(PERF_PATTERNS, year)
 
     vdir = raw_dir / f"sample_{year}"
-    orig = vdir / orig_name
-    perf = vdir / perf_name
+    orig = _find_on_disk(vdir, orig_names)
+    perf = _find_on_disk(vdir, perf_names)
 
-    if orig.exists() and perf.exists():
+    if orig and perf:
         yield VintageSource(year, orig, perf, from_zip=False)
         return
 
@@ -114,19 +140,29 @@ def materialize_vintage(raw_dir: Path, year: int, keep_extracted: bool = False) 
     try:
         with zipfile.ZipFile(zip_path) as zf:
             names = zf.namelist()
-            for target, wanted in ((orig, orig_name), (perf, perf_name)):
-                if target.exists():
+            resolved: dict[str, Path] = {}
+            for kind, wanted, already in (
+                ("origination", orig_names, orig),
+                ("performance", perf_names, perf),
+            ):
+                if already is not None:
+                    resolved[kind] = already
                     continue
                 member = _find_member(names, wanted)
                 if member is None:
                     raise AcquisitionError(
-                        f"{zip_path.name} does not contain {wanted}. Members: {names[:10]}"
+                        f"{zip_path.name} contains no {kind} file. Looked for any of "
+                        f"{wanted}; archive holds: {[Path(n).name for n in names[:10]]}"
                     )
+                target = vdir / Path(member).name
                 with zf.open(member) as src, target.open("wb") as dst:
                     while chunk := src.read(1 << 22):
                         dst.write(chunk)
                 created.append(target)
-        yield VintageSource(year, orig, perf, from_zip=True)
+                resolved[kind] = target
+        yield VintageSource(
+            year, resolved["origination"], resolved["performance"], from_zip=True
+        )
     finally:
         if not keep_extracted:
             for p in created:
@@ -160,19 +196,24 @@ def inspect_raw(raw_dir: Path) -> dict[str, object]:
             except zipfile.BadZipFile:
                 unrecognised.append(f"{entry.name} (not a valid zip)")
                 continue
-            has_orig = _find_member(members, ORIG_PATTERN.format(year=year)) is not None
-            has_perf = _find_member(members, PERF_PATTERN.format(year=year)) is not None
+            orig_hit = _find_member(members, candidate_names(ORIG_PATTERNS, year))
+            perf_hit = _find_member(members, candidate_names(PERF_PATTERNS, year))
             recognised.append({
                 "vintage": year, "form": "zip", "name": entry.name,
-                "has_origination": has_orig, "has_performance": has_perf,
+                "has_origination": orig_hit is not None,
+                "has_performance": perf_hit is not None,
+                "resolved": [orig_hit, perf_hit],
                 "members": members[:6],
             })
         elif entry.is_dir() and (m := VINTAGE_DIR_RE.match(entry.name)):
             year = int(m.group(1))
+            orig_p = _find_on_disk(entry, candidate_names(ORIG_PATTERNS, year))
+            perf_p = _find_on_disk(entry, candidate_names(PERF_PATTERNS, year))
             recognised.append({
                 "vintage": year, "form": "directory", "name": entry.name,
-                "has_origination": (entry / ORIG_PATTERN.format(year=year)).exists(),
-                "has_performance": (entry / PERF_PATTERN.format(year=year)).exists(),
+                "has_origination": orig_p is not None,
+                "has_performance": perf_p is not None,
+                "resolved": [orig_p.name if orig_p else None, perf_p.name if perf_p else None],
                 "members": sorted(p.name for p in entry.iterdir())[:6],
             })
         else:
@@ -184,8 +225,10 @@ def inspect_raw(raw_dir: Path) -> dict[str, object]:
         "recognised": recognised,
         "unrecognised": unrecognised,
         "expected_layout": [
-            "sample_<YYYY>.zip  containing sample_orig_<YYYY>.txt + sample_svcg_<YYYY>.txt",
-            "sample_<YYYY>/sample_orig_<YYYY>.txt  (already extracted)",
+            "sample_<YYYY>.zip  containing an origination and a performance file",
+            "sample_<YYYY>/     (already extracted, same two files)",
+            f"origination named any of: {list(ORIG_PATTERNS)}",
+            f"performance named any of: {list(PERF_PATTERNS)}",
         ],
     }
 

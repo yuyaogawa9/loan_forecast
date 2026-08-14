@@ -38,15 +38,14 @@ ORIG_TEMPLATE = [
     "P",            # 21 LOAN_PURPOSE
     "360",          # 22 ORIGINAL_LOAN_TERM
     "2",            # 23 NUMBER_OF_BORROWERS
-    "Other sellers",# 24 SELLER_NAME
-    "Other servicers",  # 25 SERVICER_NAME
-    "",             # 26 SUPER_CONFORMING_FLAG
-    "",             # 27 PRE_RELIEF_REFINANCE_LOAN_SEQUENCE_NUMBER
-    "9",            # 28 PROGRAM_INDICATOR
-    "",             # 29 RELIEF_REFINANCE_INDICATOR
-    "9",            # 30 PROPERTY_VALUATION_METHOD
-    "N",            # 31 INTEREST_ONLY_INDICATOR
-    "N",            # 32 MI_CANCELLATION_INDICATOR
+    "OTHER",        # 24 SELLER_NAME
+    "N",            # 25 SUPER_CONFORMING_FLAG
+    "",             # 26 PRE_RELIEF_REFINANCE_LOAN_SEQUENCE_NUMBER
+    "",             # 27 PROGRAM_INDICATOR
+    "N",            # 28 RELIEF_REFINANCE_INDICATOR
+    "1",            # 29 PROPERTY_VALUATION_METHOD
+    "N",            # 30 INTEREST_ONLY_INDICATOR
+    "9999",         # 31 VANTAGE_SCORE (not available for older vintages)
 ]
 
 # Performance field order, v47.
@@ -54,7 +53,7 @@ PERF_TEMPLATE = [
     "F07Q10000001", # 1  LOAN_SEQUENCE_NUMBER
     "200703",       # 2  MONTHLY_REPORTING_PERIOD
     "200000.00",    # 3  CURRENT_ACTUAL_UPB
-    "0",            # 4  CURRENT_LOAN_DELINQUENCY_STATUS
+    "00",           # 4  CURRENT_LOAN_DELINQUENCY_STATUS (zero-padded in real data)
     "0",            # 5  LOAN_AGE
     "360",          # 6  REMAINING_MONTHS_TO_LEGAL_MATURITY
     "",             # 7  DEFECT_SETTLEMENT_DATE
@@ -83,6 +82,9 @@ PERF_TEMPLATE = [
     "",             # 30 BORROWER_ASSISTANCE_STATUS_CODE
     "",             # 31 CURRENT_MONTH_MODIFICATION_COST
     "200000.00",    # 32 INTEREST_BEARING_UPB
+    "7",            # 33 MI_CANCELLATION_INDICATOR (moved here from origination)
+    "OTHER",        # 34 SERVICER_NAME (time-varying: servicing transfers)
+    "0.00",         # 35 UNMAPPED_FIELD_35
 ]
 
 O = {name: i for i, name in enumerate([
@@ -92,10 +94,10 @@ O = {name: i for i, name in enumerate([
     "ORIGINAL_UPB", "ORIGINAL_LOAN_TO_VALUE", "ORIGINAL_INTEREST_RATE", "CHANNEL",
     "PREPAYMENT_PENALTY_MORTGAGE", "AMORTIZATION_TYPE", "PROPERTY_STATE", "PROPERTY_TYPE",
     "POSTAL_CODE", "LOAN_SEQUENCE_NUMBER", "LOAN_PURPOSE", "ORIGINAL_LOAN_TERM",
-    "NUMBER_OF_BORROWERS", "SELLER_NAME", "SERVICER_NAME", "SUPER_CONFORMING_FLAG",
+    "NUMBER_OF_BORROWERS", "SELLER_NAME", "SUPER_CONFORMING_FLAG",
     "PRE_RELIEF_REFINANCE_LOAN_SEQUENCE_NUMBER", "PROGRAM_INDICATOR",
     "RELIEF_REFINANCE_INDICATOR", "PROPERTY_VALUATION_METHOD", "INTEREST_ONLY_INDICATOR",
-    "MI_CANCELLATION_INDICATOR",
+    "VANTAGE_SCORE",
 ])}
 
 P = {name: i for i, name in enumerate([
@@ -110,7 +112,8 @@ P = {name: i for i, name in enumerate([
     "STEP_MODIFICATION_FLAG", "PAYMENT_DEFERRAL", "ESTIMATED_LOAN_TO_VALUE",
     "ZERO_BALANCE_REMOVAL", "DELINQUENT_ACCRUED_INTEREST", "DELINQUENCY_DUE_TO_DISASTER",
     "BORROWER_ASSISTANCE_STATUS_CODE", "CURRENT_MONTH_MODIFICATION_COST",
-    "INTEREST_BEARING_UPB",
+    "INTEREST_BEARING_UPB", "MI_CANCELLATION_INDICATOR", "SERVICER_NAME",
+    "UNMAPPED_FIELD_35",
 ])}
 
 
@@ -204,12 +207,12 @@ def build_performance_lines() -> list[str]:
         lines.append(_perf(
             LOAN_SEQUENCE_NUMBER="F07Q10000002", MONTHLY_REPORTING_PERIOD=period,
             CURRENT_ACTUAL_UPB="199000.00", INTEREST_BEARING_UPB="199000.00",
-            LOAN_AGE=str(k), CURRENT_LOAN_DELINQUENCY_STATUS="XX" if k == 2 else "0",
+            LOAN_AGE=str(k), CURRENT_LOAN_DELINQUENCY_STATUS="XX" if k == 2 else "00",
             ESTIMATED_LOAN_TO_VALUE="999" if k == 3 else "80",
         ))
 
     # --- L3: rolls 0->1->2->3->6, then REO disposition with a loss ---------
-    statuses = ["0", "1", "2", "3", "4", "5", "6", "RA"]
+    statuses = ["00", "01", "02", "03", "04", "05", "06", "RA"]
     for k, (period, dlq) in enumerate(zip(_months("200703", 8), statuses)):
         terminal = k == 7
         lines.append(_perf(
@@ -237,7 +240,7 @@ def build_performance_lines() -> list[str]:
         lines.append(_perf(
             LOAN_SEQUENCE_NUMBER="F07Q10000004", MONTHLY_REPORTING_PERIOD=period,
             CURRENT_ACTUAL_UPB="197000.00", INTEREST_BEARING_UPB="197000.00",
-            LOAN_AGE=str(k), CURRENT_LOAN_DELINQUENCY_STATUS=str(min(k, 3)),
+            LOAN_AGE=str(k), CURRENT_LOAN_DELINQUENCY_STATUS=f"{min(k, 3):02d}",
             ZERO_BALANCE_CODE="03" if terminal else "",
             ZERO_BALANCE_EFFECTIVE_DATE=period if terminal else "",
             ZERO_BALANCE_REMOVAL="197000.00" if terminal else "",
@@ -251,7 +254,7 @@ def build_performance_lines() -> list[str]:
         lines.append(_perf(
             LOAN_SEQUENCE_NUMBER="F07Q10000005", MONTHLY_REPORTING_PERIOD=period,
             CURRENT_ACTUAL_UPB="196000.00", INTEREST_BEARING_UPB="196000.00",
-            LOAN_AGE=str(k), CURRENT_LOAN_DELINQUENCY_STATUS="RA" if terminal else "3",
+            LOAN_AGE=str(k), CURRENT_LOAN_DELINQUENCY_STATUS="RA" if terminal else "03",
             ZERO_BALANCE_CODE="09" if terminal else "",
             ZERO_BALANCE_EFFECTIVE_DATE=period if terminal else "",
             ZERO_BALANCE_REMOVAL="196000.00" if terminal else "",
@@ -277,7 +280,7 @@ def write_vintage(raw_dir: Path, year: int = 2007) -> tuple[Path, Path]:
     vdir = raw_dir / f"sample_{year}"
     vdir.mkdir(parents=True, exist_ok=True)
     orig = vdir / f"sample_orig_{year}.txt"
-    perf = vdir / f"sample_svcg_{year}.txt"
+    perf = vdir / f"sample_perf_{year}.txt"
     orig.write_text("\n".join(build_origination_lines()) + "\n")
     perf.write_text("\n".join(build_performance_lines()) + "\n")
     return orig, perf

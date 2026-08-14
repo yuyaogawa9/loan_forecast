@@ -20,7 +20,12 @@ import polars as pl
 from ..io import partition_file, scan_dataset, sink_partition, utc_now, write_manifest
 from ..settings import Settings
 from .amortization import DEFAULT_ABS_FLOOR, detect_upb_rounding, with_amortization
-from .events import build_loan_outcomes, with_event_flags
+from .events import (
+    build_loan_outcomes,
+    with_event_flags,
+    with_event_label,
+    with_panel_state,
+)
 from .macro_join import attach_macro
 from .severity import with_severity
 
@@ -75,14 +80,23 @@ def build_loan_month(
 
     lf = perf.join(orig, on="LOAN_SEQUENCE_NUMBER", how="left")
     lf = with_event_flags(lf)
+    # Amortization first: panel state reuses PRIOR_UPB, and the event label
+    # needs the flags that with_event_flags produced.
     lf = with_amortization(lf, abs_floor=abs_floor)
+    lf = with_panel_state(lf)
+    lf = with_event_label(lf)
     lf = with_severity(lf)
 
     # Derived from origination data alone, so they must exist whether or not
     # macro is attached -- the notebooks slice them out of FIRST_PAYMENT_DATE.
+    # Integers, not strings: vintage and seasonality are ordered quantities, and
+    # a model should be able to use that ordering rather than treating 1999 and
+    # 2008 as unrelated levels.
     lf = lf.with_columns(
-        pl.col("FIRST_PAYMENT_DATE").str.slice(0, 4).alias("ORIGINATION_YEAR"),
-        pl.col("FIRST_PAYMENT_DATE").str.slice(4, 2).alias("ORIGINATION_MONTH"),
+        pl.col("FIRST_PAYMENT_DATE").str.slice(0, 4).cast(pl.Int16, strict=False)
+        .alias("ORIGINATION_YEAR"),
+        pl.col("FIRST_PAYMENT_DATE").str.slice(4, 2).cast(pl.Int8, strict=False)
+        .alias("ORIGINATION_MONTH"),
     )
 
     if with_macro:

@@ -16,7 +16,7 @@
 
 version: 47
 dataset: origination
-field_count: 32
+field_count: 31
 separator: "|"
 has_header: false
 
@@ -185,49 +185,55 @@ fields:
     desc: '"Other sellers" is a real aggregated category, not missing.'
 
   - pos: 25
-    name: SERVICER_NAME
-    dtype: Utf8
-    nulls: [""]
-
-  - pos: 26
     name: SUPER_CONFORMING_FLAG
     dtype: Utf8
     nulls: [""]
-    enum: ["Y"]
-    desc: Y or blank. Blank means "not super conforming" -- derived to boolean downstream.
+    enum: ["Y", "N"]
 
-  - pos: 27
+  - pos: 26
     name: PRE_RELIEF_REFINANCE_LOAN_SEQUENCE_NUMBER
     dtype: Utf8
-    nulls: ["", "9" ]
+    nulls: [""]
     desc: Links a relief-refi loan back to the loan it replaced.
 
-  - pos: 28
+  - pos: 27
     name: PROGRAM_INDICATOR
     dtype: Utf8
     nulls: ["9", ""]
     enum: ["H", "F", "R"]
 
-  - pos: 29
+  - pos: 28
     name: RELIEF_REFINANCE_INDICATOR
     dtype: Utf8
     nulls: [""]
-    enum: ["Y"]
+    enum: ["Y", "N"]
 
-  - pos: 30
+  - pos: 29
     name: PROPERTY_VALUATION_METHOD
     dtype: Utf8
     nulls: ["9", ""]
-    enum: ["1", "2", "3", "4"]
+    enum: ["1", "2", "3", "4", "7"]
+    enum_strict: false
+    verify: true
+    desc: >
+      Observed values in the sample data are 1 and 7. Documented codes are
+      1=ACE, 2=full appraisal, 3=other, 4=ACE+PDR, 9=not available; 7 is not in
+      that list, so confirm against the Release 47 layout before relying on it.
 
-  - pos: 31
+  - pos: 30
     name: INTEREST_ONLY_INDICATOR
     dtype: Utf8
     nulls: [""]
     enum: ["Y", "N"]
 
-  - pos: 32
-    name: MI_CANCELLATION_INDICATOR
-    dtype: Utf8
-    nulls: ["7", "9", ""]
-    enum: ["Y", "N"]
+  - pos: 31
+    name: VANTAGE_SCORE
+    dtype: Int16
+    nulls: ["9999", ""]
+    valid: {min: 301, max: 850}
+    verify: true
+    desc: >
+      Second credit score, added by Release 47 (VantageScore 4.0). Identified
+      empirically: 9999 for every loan in vintages 1999-2025, with real values
+      appearing in 2026 (e.g. 829). The NAME is inferred -- confirm against the
+      Release 47 file layout. The 9999 sentinel handling is certain regardless.
