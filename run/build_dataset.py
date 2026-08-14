@@ -19,7 +19,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from loan_etl.acquire.freddie import discover_vintages  # noqa: E402
+from loan_etl.acquire.freddie import discover_vintages, inspect_raw  # noqa: E402
 from loan_etl.clean.ingest import DATASETS, ingest_vintage  # noqa: E402
 from loan_etl.derive.panel import build_loan_month, build_outcomes  # noqa: E402
 from loan_etl.io import free_disk_gb  # noqa: E402
@@ -31,7 +31,7 @@ from loan_etl.validate import (  # noqa: E402
     validate_curated,
 )
 
-STAGES = ("ingest", "macro", "curate", "validate", "all")
+STAGES = ("inspect", "ingest", "macro", "curate", "validate", "all")
 
 
 def parse_vintages(spec: str, available: list[int]) -> list[int]:
@@ -103,6 +103,31 @@ def main(argv: list[str] | None = None) -> int:
         print(f"vintages    : {years[0]}..{years[-1]} ({len(years)})")
 
     failures = 0
+
+    # --- inspect -----------------------------------------------------------
+    if args.stage == "inspect":
+        info = inspect_raw(settings.raw_freddie)
+        print(f"\n== inspect {info['path']} ==")
+        if not info["exists"]:
+            print("  directory does not exist yet -- create it and drop the "
+                  "Sample dataset downloads in.")
+        for r in info["recognised"]:
+            ok = "OK " if (r["has_origination"] and r["has_performance"]) else "INCOMPLETE"
+            print(f"  [{ok}] {r['name']}  ({r['form']}) "
+                  f"orig={r['has_origination']} perf={r['has_performance']}")
+            if not (r["has_origination"] and r["has_performance"]):
+                print(f"           contains: {r['members']}")
+        for u in info["unrecognised"]:
+            print(f"  [SKIP] {u}  -- name not recognised")
+        if not info["recognised"]:
+            print("\n  No usable vintages found. Expected one of:")
+            for line in info["expected_layout"]:
+                print(f"    {line}")
+            print("\n  Download from https://claritydownload.fmapps.freddiemac.com/CRT/#/sflld")
+        else:
+            years = sorted({r["vintage"] for r in info["recognised"]})
+            print(f"\n  {len(years)} vintage(s) ready: {years}")
+        return 0
 
     # --- ingest ------------------------------------------------------------
     if args.stage in ("ingest", "all"):

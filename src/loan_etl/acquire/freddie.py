@@ -135,6 +135,61 @@ def materialize_vintage(raw_dir: Path, year: int, keep_extracted: bool = False) 
                 vdir.rmdir()
 
 
+def inspect_raw(raw_dir: Path) -> dict[str, object]:
+    """Report what is present under raw/freddie and what the loader makes of it.
+
+    Clarity's download naming is not guaranteed to match what
+    ``materialize_vintage`` expects, and a silent "no vintages found" is a
+    frustrating first experience. This says exactly what was seen, what was
+    recognised, and what to rename.
+    """
+    if not raw_dir.exists():
+        return {"exists": False, "path": str(raw_dir), "recognised": [], "unrecognised": []}
+
+    recognised: list[dict[str, object]] = []
+    unrecognised: list[str] = []
+
+    for entry in sorted(raw_dir.iterdir()):
+        if entry.name.startswith("."):
+            continue
+        if m := VINTAGE_ZIP_RE.match(entry.name):
+            year = int(m.group(1))
+            try:
+                with zipfile.ZipFile(entry) as zf:
+                    members = [Path(n).name for n in zf.namelist()]
+            except zipfile.BadZipFile:
+                unrecognised.append(f"{entry.name} (not a valid zip)")
+                continue
+            has_orig = _find_member(members, ORIG_PATTERN.format(year=year)) is not None
+            has_perf = _find_member(members, PERF_PATTERN.format(year=year)) is not None
+            recognised.append({
+                "vintage": year, "form": "zip", "name": entry.name,
+                "has_origination": has_orig, "has_performance": has_perf,
+                "members": members[:6],
+            })
+        elif entry.is_dir() and (m := VINTAGE_DIR_RE.match(entry.name)):
+            year = int(m.group(1))
+            recognised.append({
+                "vintage": year, "form": "directory", "name": entry.name,
+                "has_origination": (entry / ORIG_PATTERN.format(year=year)).exists(),
+                "has_performance": (entry / PERF_PATTERN.format(year=year)).exists(),
+                "members": sorted(p.name for p in entry.iterdir())[:6],
+            })
+        else:
+            unrecognised.append(entry.name)
+
+    return {
+        "exists": True,
+        "path": str(raw_dir),
+        "recognised": recognised,
+        "unrecognised": unrecognised,
+        "expected_layout": [
+            "sample_<YYYY>.zip  containing sample_orig_<YYYY>.txt + sample_svcg_<YYYY>.txt",
+            "sample_<YYYY>/sample_orig_<YYYY>.txt  (already extracted)",
+        ],
+    }
+
+
 def source_fingerprint(path: Path) -> dict[str, object]:
     """Checksum + size + line count, recorded in every partition manifest."""
     return {
