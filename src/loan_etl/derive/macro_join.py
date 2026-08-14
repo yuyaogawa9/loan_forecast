@@ -17,6 +17,7 @@ import polars as pl
 from ..settings import Settings
 
 STATE_SERIES = "UNEMPLOYMENT_STATE"
+HPI_SERIES = "HPI_STATE"
 
 
 def load_macro(settings: Settings) -> pl.DataFrame:
@@ -40,17 +41,25 @@ def _wide_national(panel: pl.DataFrame, include_pit_unsafe: bool) -> pl.DataFram
 
 
 def _wide_state(panel: pl.DataFrame) -> pl.DataFrame:
-    st = panel.filter((pl.col("GEO_LEVEL") == "state") & (pl.col("SERIES_NAME") == STATE_SERIES))
+    """Every state-level series, pivoted wide on (period, state).
+
+    Pivots whatever state series the panel carries rather than naming one. An
+    earlier version hardcoded UNEMPLOYMENT_STATE, so adding HPI_STATE to the
+    registry fetched it, stored it, and then silently dropped it on the join --
+    the column simply never reached the panel.
+    """
+    st = panel.filter(pl.col("GEO_LEVEL") == "state")
     if st.height == 0:
         return pl.DataFrame(
             {"AVAILABLE_PERIOD": [], "GEO_CODE": [], STATE_SERIES: []},
             schema={"AVAILABLE_PERIOD": pl.Utf8, "GEO_CODE": pl.Utf8, STATE_SERIES: pl.Float64},
         )
-    return st.select(
-        "AVAILABLE_PERIOD",
-        "GEO_CODE",
-        pl.col("VALUE").alias(STATE_SERIES),
-    ).unique(subset=["AVAILABLE_PERIOD", "GEO_CODE"], keep="last")
+    return st.pivot(
+        on="SERIES_NAME",
+        index=["AVAILABLE_PERIOD", "GEO_CODE"],
+        values="VALUE",
+        aggregate_function="last",
+    )
 
 
 def attach_macro(
@@ -94,7 +103,84 @@ def attach_macro(
     else:
         lf = lf.with_columns(pl.lit(None, pl.Float64).alias("INTEREST_RATE_DIFF"))
 
+    lf = _attach_home_equity(lf, panel)
+
     # UNEMPLOYMENT is the name the existing notebooks use. Kept as an alias so
     # they keep working; UNEMPLOYMENT_STATE is the unambiguous name, since the
     # panel also carries a national series.
     return lf.with_columns(pl.col(STATE_SERIES).alias("UNEMPLOYMENT"))
+
+
+def _hpi_at_origination(panel: pl.DataFrame) -> pl.DataFrame:
+    """State HPI level at each origination month.
+
+    Joined on OBS_PERIOD, not AVAILABLE_PERIOD: the house price index prevailing
+    when the loan was written is settled history by the time we are modelling
+    month t, so there is no look-ahead in using the observed level. Only the
+    CURRENT index needs the point-in-time treatment.
+    """
+    st = panel.filter(pl.col("SERIES_NAME") == HPI_SERIES)
+    if st.height == 0:
+        return pl.DataFrame(
+            {"OBS_PERIOD": [], "GEO_CODE": [], "HPI_AT_ORIGINATION": []},
+            schema={"OBS_PERIOD": pl.Utf8, "GEO_CODE": pl.Utf8, "HPI_AT_ORIGINATION": pl.Float64},
+        )
+    return st.select(
+        "OBS_PERIOD", "GEO_CODE", pl.col("VALUE").alias("HPI_AT_ORIGINATION")
+    ).unique(subset=["OBS_PERIOD", "GEO_CODE"], keep="last")
+
+
+def _attach_home_equity(lf: pl.LazyFrame, panel: pl.DataFrame) -> pl.LazyFrame:
+    """Mark-to-market LTV and the negative-equity flag.
+
+    The single most important driver of crisis-era default, and the channel the
+    panel previously had no way to express. Derivation:
+
+        value_at_origination = ORIGINAL_UPB / (ORIGINAL_LTV / 100)
+        value_now            = value_at_origination * HPI_now / HPI_at_origination
+        MTM_LTV              = PRIOR_UPB / value_now * 100
+                             = ORIGINAL_LTV * PRIOR_POOL_FACTOR
+                                            * HPI_at_origination / HPI_now
+
+    PRIOR_UPB (via PRIOR_POOL_FACTOR) rather than the current balance, so the
+    feature stays knowable at the START of the month like every other feature.
+
+    It is also Markov-safe: HPI_at_origination is a fixed loan attribute,
+    HPI_now comes from the macro scenario, and the pool factor follows the
+    amortisation schedule -- so all three can be advanced during projection.
+    """
+    if "HPI_AT_ORIGINATION" in lf.collect_schema().names():
+        return lf
+
+    orig_hpi = _hpi_at_origination(panel)
+    lf = lf.join(
+        orig_hpi.lazy(),
+        left_on=["FIRST_PAYMENT_DATE", "PROPERTY_STATE"],
+        right_on=["OBS_PERIOD", "GEO_CODE"],
+        how="left",
+    )
+
+    hpi_now = pl.col(HPI_SERIES)
+    hpi_orig = pl.col("HPI_AT_ORIGINATION")
+    usable = hpi_now.is_not_null() & hpi_orig.is_not_null() & (hpi_orig > 0) & (hpi_now > 0)
+
+    lf = lf.with_columns(
+        pl.when(usable)
+        .then(hpi_now / hpi_orig - 1.0)
+        .otherwise(pl.lit(None, pl.Float64))
+        .alias("HPI_GROWTH_SINCE_ORIGINATION")
+    )
+    lf = lf.with_columns(
+        pl.when(usable & pl.col("PRIOR_POOL_FACTOR").is_not_null())
+        .then(
+            pl.col("ORIGINAL_LOAN_TO_VALUE")
+            * pl.col("PRIOR_POOL_FACTOR")
+            * hpi_orig
+            / hpi_now
+        )
+        .otherwise(pl.lit(None, pl.Float64))
+        .alias("MARK_TO_MARKET_LTV")
+    )
+    return lf.with_columns(
+        (pl.col("MARK_TO_MARKET_LTV") > 100.0).alias("IS_NEGATIVE_EQUITY")
+    )

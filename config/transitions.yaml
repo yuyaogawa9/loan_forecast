@@ -1,0 +1,125 @@
+# Multi-state transition model configuration.
+#
+# The state space and the per-from-state destination sets below were DERIVED
+# EMPIRICALLY from all 73.6M modelable loan-months, then pinned here so they are
+# reviewable and stable rather than silently re-derived on every run. Counts in
+# the comments are from that derivation; `states.verify_against_data` re-checks
+# them and reports drift.
+#
+# WHY DESTINATIONS ARE COLLAPSED PER FROM-STATE
+# ---------------------------------------------
+# A uniform 11-class label space would put classes with a handful of
+# observations into every model -- CURRENT -> REO occurs 11 times in 71M rows.
+# Such classes are badly calibrated and their noise then compounds at every step
+# of the forward projection. So each from-state carries only the destinations it
+# plausibly reaches.
+#
+# Rare destinations are NOT dropped. Dropping would silently delete probability
+# mass and leave the transition matrix non-stochastic. They are folded into
+# OTHER_TERMINAL, an absorbing state that exists solely to conserve mass.
+#
+# The threshold is deliberately two-tier. Transient states are structurally
+# necessary for the chain to be well defined, so they survive on a much lower
+# count; only terminal states need enough observations to estimate a rate. A
+# single 200-count rule folded 3.6% of the from-05 mass -- including real
+# DLQ_30/DLQ_60 transitions -- which would have been wrong.
+
+version: 1
+
+# --- State space ------------------------------------------------------------
+transient_states: [CURRENT, DLQ_30, DLQ_60, DLQ_90_PLUS, REO]
+
+absorbing_states:
+  - PREPAID
+  - MATURED
+  - CHARGEOFF
+  - REO_DISPOSITION
+  - CREDIT_EVENT_OTHER
+  - CENSORED
+  - OTHER_TERMINAL
+
+fallback_state: OTHER_TERMINAL
+
+thresholds:
+  transient_min_count: 50
+  terminal_min_count: 200
+
+# --- From-state bucketing ---------------------------------------------------
+# Source is PRIOR_DLQ_STATUS (Freddie's zero-padded months-delinquent code, plus
+# "RA" for REO acquisition). Loan-months whose prior status is null -- Freddie
+# reported "XX", unknown -- cannot be conditioned on and are excluded.
+from_state:
+  source_column: PRIOR_DLQ_STATUS
+  reo_code: RA
+  # MUST align with the destination alphabet. EVENT collapses every status at
+  # or beyond 3 months into DLQ_90_PLUS, so the from-states have to collapse at
+  # the same point. They did not in v1 (bucketing at 6), which left from-states
+  # 04/05/06_PLUS unreachable: a loan sitting in DLQ_90_PLUS always routed to
+  # the from-03 model, whose destinations contain neither CHARGEOFF nor REO. All
+  # default mass cycled in DLQ_90_PLUS forever and projected losses were exactly
+  # zero. `states.load_transition_config` now asserts the two alphabets match.
+  deep_delinquency_min_months: 3
+  deep_delinquency_label: "03_PLUS"
+
+# --- Per-from-state destination sets ----------------------------------------
+# Order is by observed frequency. `n` is the population row count for the
+# from-state; `folded_share` is the fraction routed to OTHER_TERMINAL.
+models:
+  "00":
+    n: 71448685
+    folded_share: 0.0000022
+    destinations: [CURRENT, PREPAID, DLQ_30, CENSORED, DLQ_60, MATURED, DLQ_90_PLUS, OTHER_TERMINAL]
+
+  "01":
+    n: 898138
+    folded_share: 0.000246
+    destinations: [DLQ_30, CURRENT, DLQ_60, PREPAID, DLQ_90_PLUS, CENSORED, OTHER_TERMINAL]
+
+  "02":
+    n: 260502
+    folded_share: 0.000656
+    destinations: [DLQ_90_PLUS, DLQ_60, DLQ_30, CURRENT, PREPAID, CENSORED, OTHER_TERMINAL]
+
+  # Everything 90+ days delinquent, pooled. This is where charge-off and REO
+  # actually originate, and pooling 03/04/05/06+ gives 860K rows to estimate
+  # those rare-but-critical transitions from.
+  "03_PLUS":
+    n: 860390
+    folded_share: 0.000098
+    destinations:
+      [DLQ_90_PLUS, CURRENT, DLQ_60, REO, DLQ_30, PREPAID, CREDIT_EVENT_OTHER, CHARGEOFF, CENSORED, OTHER_TERMINAL]
+
+  # Once in REO acquisition the only real outcomes are staying or disposing.
+  "RA":
+    n: 88695
+    folded_share: 0.000902
+    destinations: [REO, REO_DISPOSITION, OTHER_TERMINAL]
+
+# --- Case-control sampling --------------------------------------------------
+# CURRENT -> CURRENT is 95.15% of the panel (70.0M of 73.6M rows) and carries
+# almost no information. Every stratum below `keep_all_below` is retained in
+# full; larger ones are subsampled and re-weighted by 1/rate, so training still
+# targets the population distribution.
+sampling:
+  seed: 20260813
+  keep_all_below: 2000000
+  majority_rate: 0.05
+  hash_columns: [LOAN_SEQUENCE_NUMBER, MONTHLY_REPORTING_PERIOD]
+
+# --- Training ---------------------------------------------------------------
+training:
+  # Reporting years at or before this go to train; later years to validation.
+  train_through_year: 2021
+  lightgbm:
+    objective: multiclass
+    learning_rate: 0.05
+    num_leaves: 63
+    min_data_in_leaf: 200
+    feature_fraction: 0.8
+    bagging_fraction: 0.8
+    bagging_freq: 1
+    max_bin: 127          # smaller bins -> less memory during construction
+    num_threads: 6        # 8 cores, leave headroom
+    verbosity: -1
+  num_boost_round: 500
+  early_stopping_rounds: 30

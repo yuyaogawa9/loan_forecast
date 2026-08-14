@@ -52,6 +52,11 @@ roles:
       - NET_SALE_PROCEEDS_CODE
       - PRE_RELIEF_REFINANCE_LOAN_SEQUENCE_NUMBER
       - UNMAPPED_FIELD_35
+      # Added by the modelling layer's case-control sampler. FROM_STATE is the
+      # conditioning variable (it selects which model runs, so it must not also
+      # be one of that model's inputs), and SAMPLE_WEIGHT undoes the sampling.
+      - FROM_STATE
+      - SAMPLE_WEIGHT
       # Raw YYYYMM strings. Useless as features and ruinous as categoricals
       # (hundreds of levels), and fully redundant: origination timing is carried
       # by ORIGINATION_YEAR/MONTH, and time-to-maturity by LOAN_AGE and
@@ -138,8 +143,16 @@ roles:
   feature_macro:
     exact:
       - INTEREST_RATE_DIFF
+    exact_extra_note: >
+      HPI_AT_ORIGINATION is a fixed loan attribute (the index level when the loan
+      was written), and MARK_TO_MARKET_LTV combines it with the current index and
+      the amortisation-driven pool factor. All three components can be advanced
+      during projection, so these are Markov-safe despite looking path-dependent.
     patterns:
       - '^UNEMPLOYMENT'
+      - '^HPI'
+      - '^MARK_TO_MARKET_LTV$'
+      - '^IS_NEGATIVE_EQUITY$'
       - '^MORTGAGE_RATE'
       - '^TREASURY_'
       - '^CPI$'
@@ -202,6 +215,34 @@ roles:
       - VANTAGE_SCORE
       - ORIGINATION_YEAR
       - ORIGINATION_MONTH
+
+# Features that CANNOT be reconstructed at a future projection step.
+#
+# Forward projection by transition-matrix multiplication advances the state
+# distribution, not any individual loan's history. Anything path-dependent --
+# how long this loan has been delinquent, how many times it has been -- has no
+# defined value at step t+k, because the loan is in a *distribution* over states
+# rather than on one path.
+#
+# Fitting with these and then projecting by matrix recursion silently
+# mis-specifies the forecast: the model expects inputs the projection cannot
+# supply. `features.select(markov_safe_only=True)` drops them, and a test
+# asserts none reach a model that feeds project.py.
+#
+# By contrast LOAN_AGE, REMAINING_MONTHS_TO_LEGAL_MATURITY, the scheduled P&I
+# columns and PRIOR_POOL_FACTOR all advance deterministically and are safe.
+#
+# These remain valid features for pure scoring/ranking models -- they are among
+# the strongest predictors available. The restriction applies only to models
+# used for multi-period projection.
+path_dependent_features:
+  - PRIOR_DLQ_RUN_LENGTH
+  - MAX_DLQ_MONTHS_TO_DATE
+  - N_DLQ_MONTHS_TO_DATE
+  - MONTHS_SINCE_FIRST_DLQ
+  - EVER_DLQ_30_TO_DATE
+  - EVER_DLQ_90_TO_DATE
+  - PRIOR_IS_MODIFIED
 
 # Convenience target groups, so callers can ask for "the prepayment targets"
 # rather than restating column names.

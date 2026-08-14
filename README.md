@@ -139,6 +139,117 @@ month's within the same loan.
 `training_frame` filters to `IS_MODELABLE` by default, dropping each loan's
 first observation — it has no lagged state by construction.
 
+## Multi-state transition models
+
+Eight -- now five -- LightGBM multinomials, one per from-state, each predicting
+only the destinations that state actually reaches. A softmax over a from-state's
+destinations sums to 1 without renormalisation, so the transition matrix is
+row-stochastic by construction.
+
+```bash
+python -m run.train_models --stage all          # sample -> train -> evaluate -> verify
+python -m run.forecast --vintage 2007 --horizon 180 --severity 0.52
+```
+
+**Scale.** The panel is 73.6M modelable loan-months, of which `CURRENT -> CURRENT`
+is 95.15%. Case-control sampling keeps 100% of every informative stratum and
+subsamples that one at 5%, re-weighting by `1/rate`:
+
+| | |
+|---|---|
+| 73,556,410 -> 7,049,517 rows | 10.4x reduction, 94s |
+| all 77 strata reproduce population counts | worst 0.08% (hash noise) |
+| sampler peak RSS | 2.35 GB |
+| training peak RSS, all models | 2.30 GB, 102s |
+
+Ingestion is polars -> integer codes -> Arrow -> LightGBM. **pandas is never
+constructed**, which is what the old `to_pandas()` path made impossible: 73.6M x
+60 float64 is ~35 GB. A test fails if `pandas.DataFrame` appears in that path.
+
+**Two alphabets must match.** Projection occupies transient *states*
+(`CURRENT, DLQ_30, DLQ_60, DLQ_90_PLUS, REO`) while models are keyed by
+from-state, so the from-state buckets have to collapse at the same point EVENT
+does. The first version bucketed at 6 months while EVENT collapses at 3, which
+left `DLQ_90_PLUS` routed to a model with no CHARGEOFF or REO destination:
+default mass cycled forever and projected losses came out as exactly zero, with
+no error anywhere. `load_transition_config` now asserts the alphabets align, and
+`build_matrix` refuses a state with no model rather than self-looping.
+
+**Calibration** is checked on UNSAMPLED holdout data (2022-23), never on the
+training sample -- otherwise it would measure the model against the distortion
+it is meant to have corrected. Worst absolute error 6.5%, most 2-4%.
+Discrimination is strong for prepayment (AUC 0.85-0.92 across every state) and
+for deep delinquency (0.69-0.87 from 90+), weak for shallow roll (0.54-0.63),
+and absent for REO disposition timing (0.49) and for censoring (0.49) -- both
+administrative events that loan characteristics genuinely do not predict.
+
+### House prices and the negative-equity channel
+
+State HPI (FHFA via FRED, `{ST}STHPI`, 51 states -- FRED has no `PRSTHPI`) feeds
+three derived features:
+
+```
+MARK_TO_MARKET_LTV = ORIGINAL_LTV * PRIOR_POOL_FACTOR * HPI_at_origination / HPI_now
+HPI_GROWTH_SINCE_ORIGINATION
+IS_NEGATIVE_EQUITY
+```
+
+All three are Markov-safe: origination HPI is a fixed loan attribute, current HPI
+comes from the scenario, and the pool factor follows the amortisation schedule,
+so the projection re-marks the LTV every step instead of freezing it.
+
+The signal is real. On the 2007 vintage, negative equity peaks at **22.8% in
+2012** against 1.1% at origination, tracking California's 39.1% peak-to-trough
+decline. And from 90+ days delinquent, negative equity means:
+
+| | negative equity | positive equity |
+|---|---|---|
+| charge-off | 1.50% | 0.34% |
+| cure | 2.78% | 6.29% |
+
+**4.4x the charge-off rate and 2.3x lower cure.**
+
+### The remaining gap is structural, not a missing feature
+
+Adding HPI improved the 2007 backtest (credit events 1.22% -> 1.57% once
+projected over state x LTV segments rather than one average loan), but actual is
+8.97%. The cause is now diagnosed, and it is not the models:
+
+**The one-month transition models are accurate.** On 839,961 real California
+loan-months from CURRENT during 2009-2011 -- the worst of the crisis -- predicted
+versus actual is CURRENT 0.9746/0.9757, DLQ_30 0.0072/0.0081, PREPAID
+0.0167/0.0160. Ratios of 0.89-1.05.
+
+**The projection is what breaks.** Delinquency has strong duration dependence.
+From DLQ_30, the cure rate depends on how long the loan has already been down:
+
+| spell length | cure rate |
+|---|---|
+| 1 month | 51.4% |
+| 2-3 months | 30.9% |
+| 4-6 months | 19.7% |
+| 7+ months | 13.3% |
+
+A 3.9x spread. A first-order Markov chain has one DLQ_30 state, so it applies the
+same ~44% average cure to every loan in it -- a figure dominated by the
+newly-delinquent majority. Mass therefore drains out of delinquency far too fast
+and never accumulates in the deep states where charge-offs originate. The
+Markov-safe feature restriction is *correct* for matrix projection; matrix
+projection is what is inadequate.
+
+Two ways forward, and they are mutually exclusive:
+
+* **Monte Carlo path simulation.** Keep the path-dependent features
+  (`PRIOR_DLQ_RUN_LENGTH`, `MAX_DLQ_MONTHS_TO_DATE`, ...), sample a state each
+  month, and carry the history along. Higher fidelity, more compute, and the
+  matrix recursion goes away.
+* **Expand the state space to encode duration** -- `DLQ_30_NEW` vs
+  `DLQ_30_SEASONED` and so on. Keeps the matrix form; multiplies the number of
+  states and models.
+
+Until one of those lands, treat prepayment as trustworthy and projected credit
+losses as a floor.
+
 ## Design notes
 
 **Schema as data.** Field positions, dtypes, sentinels and valid ranges live in

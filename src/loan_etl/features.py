@@ -49,6 +49,7 @@ class ColumnRegistry:
     roles: dict[str, RoleSpec]
     target_groups: dict[str, str]
     categorical_features: frozenset[str]
+    path_dependent_features: frozenset[str] = frozenset()
 
     def role_of(self, column: str) -> str:
         for role in self.precedence:
@@ -111,6 +112,7 @@ def load_registry(schema_dir: Path | None = None) -> ColumnRegistry:
         roles=roles,
         target_groups=dict(spec.get("target_groups") or {}),
         categorical_features=frozenset(spec.get("categorical_features") or ()),
+        path_dependent_features=frozenset(spec.get("path_dependent_features") or ()),
     )
 
 
@@ -133,8 +135,15 @@ def select(
     include_dynamic: bool = True,
     drop: Sequence[str] = (),
     schema_dir: Path | None = None,
+    markov_safe_only: bool = False,
 ) -> SelectedColumns:
-    """Resolve the feature/target split for a panel with these columns."""
+    """Resolve the feature/target split for a panel with these columns.
+
+    ``markov_safe_only`` drops path-dependent features. Required for any model
+    that feeds multi-period projection: the projection advances a distribution
+    over states, so "how long has THIS loan been delinquent" has no value at a
+    future step.
+    """
     reg = load_registry(schema_dir)
 
     stray = unclassified_columns(columns, schema_dir)
@@ -158,6 +167,8 @@ def select(
 
     by_role = reg.classify(columns)
     dropped = set(drop)
+    if markov_safe_only:
+        dropped |= reg.path_dependent_features
     features = tuple(
         c
         for role in FEATURE_ROLES
@@ -189,6 +200,7 @@ def training_frame(
     schema_dir: Path | None = None,
     encode_categorical: bool = True,
     drop_degenerate: bool = True,
+    markov_safe_only: bool = False,
 ) -> tuple[pl.LazyFrame, SelectedColumns]:
     """Project a panel down to identifiers + safe features + one target.
 
@@ -206,6 +218,7 @@ def training_frame(
         include_dynamic=include_dynamic,
         drop=drop,
         schema_dir=schema_dir,
+        markov_safe_only=markov_safe_only,
     )
 
     if modelable_only and "IS_MODELABLE" in columns:

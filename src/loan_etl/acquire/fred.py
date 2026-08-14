@@ -88,15 +88,25 @@ def load_series_registry(schema_dir: Path) -> tuple[list[SeriesSpec], dict[str, 
 
     out = [_spec(raw) for raw in spec.get("series", [])]
 
-    st = spec.get("state_unemployment")
-    if st:
-        template = st["id_template"]
-        for state in st["states"]:
-            out.append(_spec(st, geo_code=state, sid=template.format(state=state)))
+    # State-level blocks are expanded once per state. Kept as a list so a new
+    # geography-varying series (HPI, income, ...) is a config entry rather than
+    # another special case in the loader.
+    blocks = spec.get("state_series") or []
+    if legacy := spec.get("state_unemployment"):
+        blocks = [legacy, *blocks]
+
+    uncovered: dict[str, list[str]] = {}
+    for block in blocks:
+        template = block["id_template"]
+        for state in block["states"]:
+            out.append(_spec(block, geo_code=state, sid=template.format(state=state)))
+        uncovered[block["name"]] = list(block.get("known_uncovered") or [])
 
     meta = {
         "api": spec.get("api", {}),
-        "known_uncovered": (st or {}).get("known_uncovered", []),
+        "known_uncovered_by_series": uncovered,
+        # Union, for coverage checks that do not care which series is missing.
+        "known_uncovered": sorted({s for v in uncovered.values() for s in v}),
     }
     return out, meta
 

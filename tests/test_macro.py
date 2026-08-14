@@ -48,7 +48,12 @@ def test_registry_includes_dc_and_pr():
     assert "DC" in state_codes
     assert "PR" in state_codes
     assert len(state_codes) >= 51
-    assert set(meta["known_uncovered"]) == {"GU", "VI"}
+    # PR has no PRSTHPI on FRED, so it is uncovered for HPI but not for
+    # unemployment -- which is why coverage is tracked per series.
+    assert set(meta["known_uncovered"]) == {"GU", "VI", "PR"}
+    per_series = meta["known_uncovered_by_series"]
+    assert set(per_series["UNEMPLOYMENT_STATE"]) == {"GU", "VI"}
+    assert set(per_series["HPI_STATE"]) == {"GU", "VI", "PR"}
 
 
 def test_recession_indicator_flagged_pit_unsafe():
