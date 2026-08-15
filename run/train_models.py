@@ -26,8 +26,9 @@ from loan_model.registry import load_all  # noqa: E402
 from loan_model.sampling import build_training_sample, verify_reweighting  # noqa: E402
 from loan_model.states import load_transition_config, verify_against_data  # noqa: E402
 from loan_model.train import DEFAULT_MODEL_NAME, train_all  # noqa: E402
+from loan_model.train_amounts import train_amount_models  # noqa: E402
 
-STAGES = ("sample", "train", "evaluate", "verify", "all")
+STAGES = ("sample", "train", "amounts", "evaluate", "verify", "all")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -88,6 +89,22 @@ def _run(args, settings, cfg, only) -> int:
             markov_safe=not args.allow_path_dependent,
             only=only,
         )
+
+    if args.stage in ("amounts", "all"):
+        print("\n== amounts (conditional on outcome) ==")
+        summary = train_amount_models(settings, cfg, name=args.name, only=only)
+        for target, m in summary["metrics"].items():
+            rows = f"train={m['train_rows']:>9,} valid={m['valid_rows']:>8,}"
+            print(f"  {target:22s} {rows} {m['fit_seconds']:>7.1f}s")
+            for key in ("calibration", "out_of_time_calibration"):
+                if m.get(key):
+                    worst = max(abs(r["error"]) for r in m[key])
+                    print(f"      {key:24s} worst coverage error {worst:.4f}")
+            if "valid_actual_rate" in m:
+                print(
+                    f"      hazard rate: predicted {m['valid_predicted_rate']:.4f} "
+                    f"vs actual {m['valid_actual_rate']:.4f}"
+                )
 
     if args.stage in ("evaluate", "all"):
         print("\n== evaluate (UNSAMPLED holdout) ==")

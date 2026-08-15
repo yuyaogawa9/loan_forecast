@@ -6,7 +6,7 @@ the same pattern the ETL uses for field schemas.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -34,6 +34,16 @@ class TransitionConfig:
     models: dict[str, dict[str, Any]]
     sampling: dict[str, Any]
     training: dict[str, Any]
+    simulation: dict[str, Any] = field(default_factory=dict)
+    amounts: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def principal_paid_factor(self) -> dict[str, float]:
+        """Share of scheduled principal actually paid, by delinquency months."""
+        return {
+            str(k): float(v)
+            for k, v in (self.simulation.get("principal_paid_factor") or {}).items()
+        }
 
     # --- State space ------------------------------------------------------
     @property
@@ -155,6 +165,8 @@ def load_transition_config(path: Path | None = None) -> TransitionConfig:
         models={k: dict(v) for k, v in spec["models"].items()},
         sampling=dict(spec["sampling"]),
         training=dict(spec["training"]),
+        simulation=dict(spec.get("simulation") or {}),
+        amounts=dict(spec.get("amounts") or {}),
     )
 
     known = set(cfg.all_states)

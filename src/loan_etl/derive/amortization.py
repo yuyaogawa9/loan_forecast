@@ -91,8 +91,14 @@ def scheduled_balance(
     )
 
 
-def _scheduled_principal(prior_upb: pl.Expr, rate_pct: pl.Expr, remaining: pl.Expr) -> pl.Expr:
-    """Principal portion of one level payment, given current state."""
+def scheduled_principal(prior_upb: pl.Expr, rate_pct: pl.Expr, remaining: pl.Expr) -> pl.Expr:
+    """Principal portion of one level payment, given current state.
+
+    Recursive form: takes the CURRENT balance and remaining term rather than
+    origination terms, so it composes with a balance that has been reduced by
+    curtailments. `scheduled_balance` is closed-form from origination and cannot
+    -- which is why the path simulator advances balances through this.
+    """
     i = rate_pct / 1200.0
     factor = 1.0 / (1.0 - (1.0 + i).pow(-remaining)) - 1.0
     return (
@@ -133,7 +139,7 @@ def with_amortization(
             pl.col("ORIGINAL_LOAN_TERM"),
             pl.col("LOAN_AGE"),
         ).alias("SCHEDULED_UPB_AT_ORIGINATION_TERMS"),
-        _scheduled_principal(
+        scheduled_principal(
             pl.col("PRIOR_UPB"),
             pl.col("PRIOR_RATE"),
             pl.col("PRIOR_REMAINING_MONTHS"),

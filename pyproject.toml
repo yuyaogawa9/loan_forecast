@@ -25,13 +25,25 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-model = ["xgboost>=2.0", "scikit-learn>=1.4", "matplotlib>=3.8", "tqdm>=4.66"]
+model = [
+    # LightGBM is the modelling layer's primary engine: it ingests pyarrow
+    # natively, which is what removes the pandas copy that made the full panel
+    # unusable on 8 GB.
+    "lightgbm>=4.4",
+    "scikit-learn>=1.4",
+    "matplotlib>=3.8",
+    "tqdm>=4.66",
+]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 
 [project.scripts]
 build-dataset = "run.build_dataset:main"
+train-models = "run.train_models:main"
+forecast = "run.forecast:main"
 
 [tool.setuptools.packages.find]
+# Both packages live under src/: loan_etl (raw -> curated panel) and
+# loan_model (panel -> transition models -> forecast).
 where = ["src"]
 
 [tool.pytest.ini_options]

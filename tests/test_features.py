@@ -249,18 +249,21 @@ def test_degenerate_drop_can_be_disabled(curated):
     assert "SUPER_CONFORMING_FLAG" in cols.features
 
 
-def test_frame_actually_trains_an_xgboost_model(curated):
-    """End-to-end proof the panel is model-ready, not just well-typed."""
-    xgb = pytest.importorskip("xgboost")
-    lf, cols = training_frame(_panel(curated), "delinquency_90")
-    df = lf.collect()
-    X = df.select(cols.features).to_pandas()
-    y = df[cols.target].to_pandas().astype(int)
-    model = xgb.XGBClassifier(
-        n_estimators=5, max_depth=2, enable_categorical=True, tree_method="hist"
-    )
-    model.fit(X, y)
-    assert model.predict_proba(X).shape == (df.height, 2)
+def test_frame_actually_trains_a_model(curated):
+    """End-to-end proof the panel is model-ready, not just well-typed.
+
+    Uses LightGBM via the Arrow path -- the engine the pipeline actually uses --
+    so this exercises the real ingestion route rather than a parallel one.
+    """
+    lgb = pytest.importorskip("lightgbm")
+    from loan_model.dataset import CategoricalEncoder, build_dataset
+
+    lf, cols = training_frame(_panel(curated), "delinquency_90", encode_categorical=False)
+    df = lf.collect().with_columns(pl.col(cols.target).cast(pl.Int32).alias("_y"))
+    enc = CategoricalEncoder.fit(df, [c for c in cols.categorical if c in df.columns])
+    ds = build_dataset(df, list(cols.features), "_y", encoder=enc)
+    booster = lgb.train({"objective": "binary", "verbose": -1, "num_leaves": 4}, ds, 5)
+    assert booster.num_trees() > 0
 
 
 def test_starting_state_conditions_on_prior_status(curated):

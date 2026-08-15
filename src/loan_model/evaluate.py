@@ -125,37 +125,6 @@ def one_vs_rest_auc(proba: np.ndarray, labels: np.ndarray, cls: int) -> float | 
     return float((ranks[y == 1].sum() - pos * (pos + 1) / 2) / (pos * neg))
 
 
-def score_from_state(
-    settings: Settings,
-    model: TransitionModel,
-    cfg: TransitionConfig | None = None,
-    *,
-    years: Sequence[int] = (2022, 2023),
-    rate: float = 1.0,
-) -> dict[str, Any]:
-    cfg = cfg or load_transition_config()
-    df = holdout_frame(
-        settings, model.from_state, cfg, years=years, rate=rate, columns=model.features
-    )
-    if df.height == 0:
-        return {"from_state": model.from_state, "n": 0}
-
-    df = df.with_columns(cfg.label_expr(model.from_state))
-    proba = predict_destinations(model, df)
-    labels = df["LABEL"].to_numpy()
-
-    aucs = {
-        dest: one_vs_rest_auc(proba, labels, cls)
-        for dest, cls in sorted(model.label_map.items(), key=lambda kv: kv[1])
-    }
-    return {
-        "from_state": model.from_state,
-        "n": df.height,
-        "multi_logloss": multiclass_logloss(proba, labels),
-        "auc_by_destination": {k: (round(v, 4) if v is not None else None) for k, v in aucs.items()},
-    }
-
-
 def evaluate_all(
     settings: Settings,
     models: dict[str, TransitionModel],

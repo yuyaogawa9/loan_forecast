@@ -100,10 +100,3 @@ def save_registry_index(settings: Settings, name: str, payload: dict[str, Any]) 
     path = base / "registry.json"
     path.write_text(json.dumps({**payload, "saved_utc": utc_now()}, indent=2, default=str))
     return path
-
-
-def read_registry_index(settings: Settings, name: str) -> dict[str, Any] | None:
-    path = model_dir(settings, name) / "registry.json"
-    if not path.exists():
-        return None
-    return json.loads(path.read_text())

@@ -28,7 +28,7 @@ Useful variants:
 python -m run.build_dataset --stage ingest --vintages 1999-2010
 python -m run.build_dataset --stage all --vintages 2007 --skip-macro   # no FRED key
 python -m run.build_dataset --stage validate --vintages all
-pytest                                                                  # 43 tests
+pytest                                                                  # 157 tests
 ```
 
 ## Pipeline stages
@@ -52,18 +52,42 @@ deleted after conversion, which is what keeps peak disk within budget.
 ## Layout
 
 ```
-config/schemas/     versioned field specs (YAML) -- the single source of truth
-src/loan_etl/
-  schema.py         YAML -> polars dtypes, cast + sentinel expressions
-  settings.py       secret.env -> typed Settings
-  io.py             hive partitioning, manifests, checksums
-  acquire/          freddie.py (source registry), fred.py (ALFRED PIT)
-  clean/ingest.py   scan_csv -> typed bronze parquet
-  derive/           amortization, events, severity, macro_join, panel
-  validate.py       gates
-run/build_dataset.py  CLI orchestrator
-functions/loan_xgb.py modelling helpers (unchanged)
+config/
+  schemas/            versioned source-file specs + the column role registry
+  transitions.yaml    state space, destination collapse, sampling, training, simulation
+src/loan_etl/         raw text -> curated loan-month panel
+  schema.py           YAML -> polars dtypes, cast + sentinel expressions
+  settings.py         secret.env -> typed Settings
+  io.py               hive partitioning, manifests, checksums, data lock
+  features.py         leakage-screened feature selection
+  acquire/            freddie.py (source registry), fred.py (ALFRED PIT macro)
+  clean/ingest.py     scan_csv -> typed bronze parquet
+  derive/             amortization, events, severity, macro_join, panel
+  validate.py         gates
+src/loan_model/       panel -> transition models -> forecast
+  states.py           state space + from-state bucketing
+  sampling.py         deterministic case-control sampler
+  dataset.py          polars -> Arrow -> LightGBM (no pandas)
+  train.py            per-from-state multinomials
+  evaluate.py         unsampled-holdout calibration
+  transition.py       row-stochastic matrix assembly
+  project.py          matrix projection under a macro scenario
+  paths.py            per-path delinquency history (parity with the ETL)
+  simulate.py         Monte Carlo path simulation, batched month-outer
+  scenario.py         Scenario (one state) + MacroPanel (all 52, batched)
+  lgd.py              bucketed empirical severity (baseline)
+  amounts.py          quantile-regression amount models + binary hazard
+  train_amounts.py    fits severity, prepay hazard and curtailment
+  registry.py         model persistence
+run/
+  build_dataset.py    ETL CLI
+  train_models.py     modelling CLI
+  forecast.py         projection + simulation CLI
+tests/                157 tests
 ```
+
+Installed as a package, the three CLIs are also available as `build-dataset`,
+`train-models` and `forecast`.
 
 ## Modelling from the panel
 
@@ -80,13 +104,12 @@ from loan_etl.features import training_frame
 s = get_settings()
 panel = scan_dataset(s.curated / "loan_month")
 
-lf, cols = training_frame(panel, "default")     # safe features only; 31 leakage columns blocked
+lf, cols = training_frame(panel, "default")   # safe features only; 31 leakage columns blocked
 train = lf.filter(pl.col("MONTHLY_REPORTING_PERIOD").str.slice(0, 4) <= "2021").collect()
-
-import xgboost as xgb
-model = xgb.XGBClassifier(enable_categorical=True, tree_method="hist")
-model.fit(train.select(cols.features).to_pandas(), train[cols.target].to_pandas())
 ```
+
+For the multi-state models the pipeline uses, go through `run/train_models.py`
+rather than hand-rolling a fit -- see the next section.
 
 `training_frame` returns a frame XGBoost accepts directly: string features are
 cast to `pl.Categorical` (derived from dtype, so none can be missed), and
@@ -209,7 +232,7 @@ decline. And from 90+ days delinquent, negative equity means:
 
 **4.4x the charge-off rate and 2.3x lower cure.**
 
-### The remaining gap is structural, not a missing feature
+### The gap was structural, not a missing feature
 
 Adding HPI improved the 2007 backtest (credit events 1.22% -> 1.57% once
 projected over state x LTV segments rather than one average loan), but actual is
@@ -237,18 +260,176 @@ and never accumulates in the deep states where charge-offs originate. The
 Markov-safe feature restriction is *correct* for matrix projection; matrix
 projection is what is inadequate.
 
-Two ways forward, and they are mutually exclusive:
+There were two ways forward -- Monte Carlo path simulation, or expanding the
+state space to encode duration (`DLQ_30_NEW` vs `DLQ_30_SEASONED`, keeping the
+matrix form but multiplying states and models). The first is implemented, and it
+closes about half the gap. See the backtest below.
 
-* **Monte Carlo path simulation.** Keep the path-dependent features
-  (`PRIOR_DLQ_RUN_LENGTH`, `MAX_DLQ_MONTHS_TO_DATE`, ...), sample a state each
-  month, and carry the history along. Higher fidelity, more compute, and the
-  matrix recursion goes away.
-* **Expand the state space to encode duration** -- `DLQ_30_NEW` vs
-  `DLQ_30_SEASONED` and so on. Keeps the matrix form; multiplies the number of
-  states and models.
+## Monte Carlo simulation
 
-Until one of those lands, treat prepayment as trustworthy and projected credit
-losses as a floor.
+```bash
+python -m run.train_models --stage train --allow-path-dependent --name transitions_full
+python -m run.forecast --vintage 2007 --method mc --name transitions_full \
+    --horizon 120 --empirical-severity
+```
+
+Each path is a single history, so the seven path-dependent features are exactly
+computable at every step rather than excluded, and the true delinquency month
+count survives instead of pinning at the collapse threshold. Simulating the
+*actual* loans also removes the convexity bias of projecting one average loan.
+
+**Why it is affordable: the loops run month-outer, path-inner.** Measured on the
+real `00` booster:
+
+| batch | total | per row |
+|---|---|---|
+| 1 | 93.4 ms | 93,390 us |
+| 1,000 | 5.3 ms | 5.31 us |
+| 200,000 | 334.2 ms | 1.67 us |
+
+Fixed per-call overhead dominates below ~1,000 rows. So every active path is
+grouped by from-state and scored in ONE batched call per from-state per month:
+predict calls come to `horizon x |from_states|`, **independent of path count**.
+Per-path simulation of a 50,000-loan cohort would issue 30M single-row calls and
+take about a day; batched, the same run is seconds. `test_simulate.py` asserts
+the call-count bound directly, because a regression here would make simulation
+unusable at portfolio size rather than visibly wrong.
+
+**Correctness rests on `paths.py` reproducing the ETL exactly.** If the simulator
+derives history features even slightly differently from `with_panel_state`, the
+model receives a covariate distribution it never saw in training -- and the
+resulting probabilities are wrong with no error anywhere. The gate is a parity
+test that replays real loans' *observed* delinquency sequences through the
+simulator's own recursion: **exact parity on all nine features across 386,436
+modelable loan-months from 6,000 real loans.**
+
+Two ETL behaviours are deliberately preserved rather than "fixed", because they
+are what training saw: an REO month is not a delinquent month (`"RA"` does not
+parse, so it breaks the delinquency run), and `DLQ_90_PLUS` is a lumped state
+whose underlying month counter keeps climbing.
+
+## Conditional amount models
+
+The transition models answer *which* outcome a loan reaches; these answer *how
+much*, given that it did.
+
+```bash
+python -m run.train_models --stage amounts --name transitions_full
+```
+
+| model | target | observations |
+|---|---|---|
+| severity | `LOSS_SEVERITY`, conditioned on WHICH credit event | 19,630 |
+| prepay hazard | `IS_PARTIAL_PREPAYMENT` | 3.5M sampled of 71M reliable |
+| curtailment | `CURTAILMENT / PRIOR_UPB` | 1.5M sampled of 15.2M |
+
+There is deliberately **no full-prepayment amount model**:
+`ZERO_BALANCE_REMOVAL / PRIOR_UPB` is exactly 1.0000 at the 10th, 50th and 90th
+percentiles, so fitting it would estimate a constant. That identity also confirms
+the severity denominator is `PRIOR_UPB`, which is what makes
+`loss = balance x severity` the right arithmetic.
+
+**Quantile regression, not a conditional mean.** Monte Carlo needs a
+distribution, and realised severity runs from −7.9% at the 1st percentile (a
+disposition can produce a gain) to +147.8% at the 99th. Nine boosters per target
+are fitted across the grid and sampled by inverting the predicted curve, so the
+*shape* of the distribution varies with covariates. Coverage on held-out data —
+the only test that establishes a quantile model is a distribution rather than a
+curve that fits — comes out at **worst error 0.042, and 0.040 out-of-time**.
+
+Conditioning on the outcome is the single biggest gain available, and it works:
+predicted median severity by destination is 0.542 / 0.380 / 0.362 against actual
+0.540 / 0.368 / 0.335, instead of collapsing to the pooled 0.453.
+
+Independently fitted quantiles cross — on **29% of real rows** — which would
+yield a non-monotone inverse CDF and therefore invalid draws. Each predicted
+curve is sorted before use.
+
+### Balances became a path variable
+
+Simulated balances used to follow the closed-form origination schedule. They now
+carry forward per path, amortising through `scheduled_principal` on the loan's
+*own* balance and scaled by how much of the scheduled principal a loan in that
+delinquency state actually pays. Read off the observed medians:
+
+| entering the month | principal paid |
+|---|---|
+| current | 0.202% of balance |
+| 1 month down | 0.152% |
+| 2 months down | 0.088% |
+| **90+ days down** | **0.000%** |
+
+A delinquent loan stops paying down, which is why defaulted loans really do carry
+balances a median 2.4% *above* the origination schedule (p90 +9.8%). Encoding it
+this way reproduces that mechanically, with no extra model.
+
+Curtailment then reduces the balance where the hazard fires. It matters:
+curtailment is **32.7% of all principal reduction** ($14.4bn against $29.5bn
+scheduled), and simulating it takes prepayment speed from structurally absent to
+**mean CPR 19.08% against an actual 17.81%**, with total curtailment $260M
+against an actual $298M.
+
+### A data artefact the severity ratio hides
+
+Nine credit events carry a defaulted balance of $0.01–$517 against a median of
+$141,286 — loans already paid down to nothing — producing severities up to
+**657,341**. In dollars they are 0.005% of all loss, but the bucketed sampler
+draws directly from the observed array, so one draw would book a phantom loss
+larger than the portfolio. `severity.py` guards only `ZERO_BALANCE_REMOVAL > 0`;
+both samplers now require a materially positive balance.
+
+### 2007 backtest under realised macro
+
+All 50,000 real loans of the vintage, 120 months, macro path as it actually
+occurred -- so any remaining gap is model error, not scenario error.
+
+| | credit events | loss (% of original UPB) |
+|---|---|---|
+| matrix projection (cohort-average loan) | 1.32% | ~0% |
+| Monte Carlo, flat/bucketed amounts | 5.02% | 2.34% |
+| **Monte Carlo + conditional amount models** | **4.74%** | **1.92%** |
+| actual, within 120 months | 8.35% | 3.76% |
+
+**3.6x the matrix on credit events, closing roughly half the distance to actual.**
+Loss per event lands at 0.405 against an actual 0.450 -- so severity is ~90% of
+realised, and the dominant remaining gap is the event COUNT, not the amount. The
+run takes 6.5 seconds without the amount models and 89 seconds with them; the
+quantile grid costs nine boosters per curtailment draw, every month.
+
+The residual is now located, and it is *not* the charge-off transition:
+simulated delinquency peaks at 10.40% against an actual 15.50%, and runs at
+0.45-0.58x actual from 2010 onward. Too few loans become delinquent and stay
+delinquent; the ones that do get resolved about right.
+
+The largest identified contributor is `PRIOR_IS_MODIFIED`, which simulation
+freezes. Modification is a servicer loss-mitigation decision that nothing here
+predicts, and inventing modifications would fabricate the most effective cure
+mechanism of the crisis vintages -- but the flag matters: modified loan-months
+run a **24.8% delinquency rate against 7.9% unmodified, 3.1x**, and 6.16% of the
+2007 vintage was modified at some point. That accounts for roughly a quarter of
+the remaining gap. Modelling modification as its own transition is the next
+lever, ahead of any further feature work.
+
+Treat prepayment as trustworthy, and simulated credit losses as a much better
+floor than the matrix gave -- still a floor.
+
+### A leakage bug found by the parity gate
+
+`MONTHS_SINCE_FIRST_DLQ` ranked first delinquency by `min(LOAN_AGE)`. Taking a
+minimum over the whole loan partition is only causally safe if the key is
+monotonic -- and `LOAN_AGE` is not, because a modification resets it. Loan
+`F07Q10169987` is modified in 200911 while 30 days down and its age resets 32 ->
+1, so the feature reported "1 month since first delinquency" back in **200704,
+five months before the loan first missed a payment**.
+
+That affected **234,852 modelable loan-months -- 2.55% of the rows where the
+feature was populated**, concentrated in modified loans, which are exactly the
+crisis-vintage loans that drive credit losses. The feature is now measured on the
+reporting period, which is monotonic by construction; the rebuilt panel contains
+zero leaking rows.
+
+It surfaced only because the simulator physically cannot reproduce a non-causal
+value, so the parity test had nowhere to hide it.
 
 ## Design notes
 

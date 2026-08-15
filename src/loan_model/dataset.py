@@ -159,10 +159,18 @@ def build_dataset(
     weight_column: str | None = None,
     reference: lgb.Dataset | None = None,
     free_raw_data: bool = True,
+    label_dtype: pl.DataType | None = None,
 ) -> lgb.Dataset:
-    """Construct an ``lgb.Dataset`` without ever touching pandas."""
+    """Construct an ``lgb.Dataset`` without ever touching pandas.
+
+    ``label_dtype`` defaults to Int32 for the class-index labels the transition
+    multinomials use, and MUST be set to a float type for regression targets.
+    Leaving it integral silently truncates: a loss severity of 0.453 becomes 0,
+    and the fitted model then describes a variable that is zero almost
+    everywhere -- which looks like a fit, not like an error.
+    """
     table = to_arrow_features(df, features, encoder)
-    label = df[label_column].cast(pl.Int32).to_arrow()
+    label = df[label_column].cast(label_dtype or pl.Int32).to_arrow()
     weight = (
         df[weight_column].cast(pl.Float32).to_arrow() if weight_column else None
     )

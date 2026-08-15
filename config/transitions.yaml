@@ -123,3 +123,68 @@ training:
     verbosity: -1
   num_boost_round: 500
   early_stopping_rounds: 30
+
+# --- Monte Carlo simulation -------------------------------------------------
+# Matrix projection cannot represent duration dependence: it holds ONE DLQ_30
+# state and applies the same average cure rate to every loan in it, when the real
+# rate runs 51.4% (one month down) to 13.3% (seven or more). Simulation samples a
+# path per loan instead, so the path-dependent features are exactly computable
+# and the true delinquency month count survives.
+#
+# Cost is driven by predict CALLS, not paths: the engine scores every active path
+# in one batched call per from-state per month, so a run costs
+# horizon x |from_states| calls regardless of how many paths there are. Raising
+# `replicates` is therefore close to free until memory binds.
+simulation:
+  seed: 20260814
+  # One draw per loan is unbiased for portfolio aggregates once the book is
+  # large. Raise it to tighten the tail percentiles of the loss distribution,
+  # which is the part a credit investor actually prices.
+  replicates: 1
+  # Paths held in memory at once. At ~60 float32 features a chunk of 250k costs
+  # roughly 60 MB, well inside the 3 GB ceiling the rest of the pipeline keeps.
+  chunk_paths: 250000
+  horizon: 120
+
+  # Loss given default, drawn from realised LOSS_SEVERITY rather than assumed
+  # flat. Conditioned on mark-to-market equity, which is what actually determines
+  # what a disposition recovers. This is the bucketed BASELINE; the fitted
+  # quantile model under `amounts:` supersedes it when present.
+  severity:
+    by_state: true
+    ltv_edges: [80.0, 100.0, 120.0]
+    min_observations: 50
+
+  # Scheduled principal actually paid, as a fraction of the level payment's
+  # principal portion, by delinquency months entering the month. Read off the
+  # observed medians (0.202% of balance when current, 0.152% at one month down,
+  # 0.088% at two, 0.000% at 90+): a delinquent loan stops paying down.
+  #
+  # This is what makes exposure at default come out right. Defaulted loans carry
+  # balances a median 2.4% ABOVE the origination schedule (p90 +9.8%), and the
+  # closed-form scheduled balance cannot produce that. Here it falls out
+  # mechanically, with no extra model.
+  principal_paid_factor:
+    "0": 1.00
+    "1": 0.75
+    "2": 0.44
+    "3_plus": 0.00
+
+# --- Conditional amount models ----------------------------------------------
+# How much, given that an outcome occurred. Quantile regression rather than a
+# conditional mean because Monte Carlo needs a distribution: realised severity
+# runs from -7.9% at the 1st percentile (dispositions can produce a gain) to
+# +147.8% at the 99th, which no symmetric residual can represent.
+#
+# There is deliberately no full-prepayment amount model. ZERO_BALANCE_REMOVAL /
+# PRIOR_UPB is exactly 1.0000 at p10, p50 and p90 -- a payoff retires the balance
+# and nothing else -- so fitting it would estimate a constant.
+amounts:
+  seed: 20260814
+  quantiles: [0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]
+  # Severity uses every one of its ~19.6k observations: they are the rarest and
+  # most valuable rows in the panel. Only the curtailment frames are subsampled,
+  # and uniformly -- partial prepayment occurs in ~21% of performing loan-months,
+  # so it is not rare and needs no case-control weighting.
+  hazard_rate: 0.05
+  amount_rate: 0.10

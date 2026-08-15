@@ -87,6 +87,11 @@ def with_event_flags(lf: pl.LazyFrame) -> pl.LazyFrame:
     return lf
 
 
+def _period_index(period: pl.Expr) -> pl.Expr:
+    """YYYYMM -> a monotone month counter, so periods can be differenced."""
+    return period.str.slice(0, 4).cast(pl.Int32) * 12 + period.str.slice(4, 2).cast(pl.Int32)
+
+
 def with_panel_state(
     lf: pl.LazyFrame,
     *,
@@ -132,12 +137,29 @@ def with_panel_state(
         .alias("PRIOR_DLQ_RUN_LENGTH")
     )
 
-    # Age at first delinquency, used only where it strictly precedes this month
-    # -- otherwise it would be reading a future event.
-    first_dlq_age = pl.col("LOAN_AGE").filter(is_dlq).min().over(partition_by=loan_key)
+    # Months since the loan first went delinquent, measured on the REPORTING
+    # PERIOD rather than LOAN_AGE.
+    #
+    # Taking the minimum over the whole loan partition is only causally safe if
+    # the key is monotonic, because the `< current` guard is what excludes future
+    # events. LOAN_AGE is NOT monotonic: a modification resets it, and Freddie
+    # restates it from the modified terms. Ranking on it therefore let a future
+    # delinquency masquerade as a past one -- loan F07Q10169987 is modified in
+    # 200911 while 30 days down and its age resets 32 -> 1, so `min(LOAN_AGE)`
+    # over delinquent rows returned 1 and the feature reported "1 month since
+    # first delinquency" back in 200704, five months BEFORE the loan first
+    # missed a payment. That affected 255,344 modelable loan-months (2.77% of
+    # the rows where this feature is populated), concentrated in modified loans
+    # -- which are exactly the crisis-vintage loans that drive credit losses.
+    #
+    # The reporting period is monotonic by construction, so the same guard is
+    # sound against it, and the elapsed count is in real calendar months rather
+    # than a counter the servicer can reset.
+    period_index = _period_index(pl.col(order_key))
+    first_dlq_period = period_index.filter(is_dlq).min().over(partition_by=loan_key)
     lf = lf.with_columns(
-        pl.when(first_dlq_age < pl.col("LOAN_AGE"))
-        .then(pl.col("LOAN_AGE") - first_dlq_age)
+        pl.when(first_dlq_period < period_index)
+        .then((period_index - first_dlq_period).cast(pl.Int32))
         .otherwise(pl.lit(None, pl.Int32))
         .alias("MONTHS_SINCE_FIRST_DLQ")
     )
